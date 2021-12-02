@@ -33,7 +33,7 @@ import (
 	"github.com/docker/cli/cli/compose/loader"
 	"github.com/docker/cli/cli/compose/types"
 
-	shlex "github.com/google/shlex"
+	"github.com/google/shlex"
 	"github.com/kubernetes/kompose/pkg/kobject"
 	"github.com/pkg/errors"
 	log "github.com/sirupsen/logrus"
@@ -133,27 +133,66 @@ func parseV3(files []string) (kobject.KomposeObject, error) {
 	return komposeObject, nil
 }
 
-func loadV3Placement(constraints []string) map[string]string {
-	placement := make(map[string]string)
-	errMsg := " constraints in placement is not supported, only 'node.hostname', 'engine.labels.operatingsystem' and 'node.labels.xxx' (ex: node.labels.something == anything) is supported as a constraint "
-	for _, j := range constraints {
-		p := strings.Split(j, " == ")
+func loadV3Placement(placement types.Placement) kobject.Placement {
+	komposePlacement := kobject.Placement{
+		PositiveConstraints: make(map[string]string),
+		NegativeConstraints: make(map[string]string),
+		Preferences:         make([]string, 0, len(placement.Preferences)),
+	}
+
+	// Convert constraints
+	equal, notEqual := " == ", " != "
+	for _, j := range placement.Constraints {
+		operator := equal
+		if strings.Contains(j, notEqual) {
+			operator = notEqual
+		}
+		p := strings.Split(j, operator)
 		if len(p) < 2 {
-			log.Warn(p[0], errMsg)
+			log.Warnf("Failed to parse placement constraints %s, the correct format is 'label == xxx'", j)
 			continue
 		}
-		if p[0] == "node.hostname" {
-			placement["kubernetes.io/hostname"] = p[1]
-		} else if p[0] == "engine.labels.operatingsystem" {
-			placement["beta.kubernetes.io/os"] = p[1]
-		} else if strings.HasPrefix(p[0], "node.labels.") {
-			label := strings.TrimPrefix(p[0], "node.labels.")
-			placement[label] = p[1]
-		} else {
-			log.Warn(p[0], errMsg)
+
+		key, err := convertDockerLabel(p[0])
+		if err != nil {
+			log.Warn("Ignore placement constraints: ", err.Error())
+			continue
+		}
+
+		if operator == equal {
+			komposePlacement.PositiveConstraints[key] = p[1]
+		} else if operator == notEqual {
+			komposePlacement.NegativeConstraints[key] = p[1]
 		}
 	}
-	return placement
+
+	// Convert preferences
+	for _, p := range placement.Preferences {
+		// Spread is the only supported strategy currently
+		label, err := convertDockerLabel(p.Spread)
+		if err != nil {
+			log.Warn("Ignore placement preferences: ", err.Error())
+			continue
+		}
+		komposePlacement.Preferences = append(komposePlacement.Preferences, label)
+	}
+	return komposePlacement
+}
+
+// Convert docker label to k8s label
+func convertDockerLabel(dockerLabel string) (string, error) {
+	switch dockerLabel {
+	case "node.hostname":
+		return "kubernetes.io/hostname", nil
+	case "engine.labels.operatingsystem":
+		return "kubernetes.io/os", nil
+	default:
+		if strings.HasPrefix(dockerLabel, "node.labels.") {
+			return strings.TrimPrefix(dockerLabel, "node.labels."), nil
+		}
+	}
+	errMsg := fmt.Sprint(dockerLabel, " is not supported, only 'node.hostname', 'engine.labels.operatingsystem' and 'node.labels.xxx' (ex: node.labels.something == anything) is supported")
+	return "", errors.New(errMsg)
 }
 
 // Convert the Docker Compose v3 volumes to []string (the old way)
@@ -194,30 +233,30 @@ func loadV3Ports(ports []types.ServicePortConfig, expose []string) []kobject.Por
 			HostPort:      int32(port.Published),
 			ContainerPort: int32(port.Target),
 			HostIP:        "",
-			Protocol:      api.Protocol(strings.ToUpper(port.Protocol)),
+			Protocol:      strings.ToUpper(port.Protocol),
 		})
 
-		exist[cast.ToString(port.Target)+strings.ToUpper(port.Protocol)] = true
+		exist[cast.ToString(port.Target)+port.Protocol] = true
 	}
 
 	if expose != nil {
 		for _, port := range expose {
 			portValue := port
-			protocol := api.ProtocolTCP
+			protocol := string(api.ProtocolTCP)
 			if strings.Contains(portValue, "/") {
 				splits := strings.Split(port, "/")
 				portValue = splits[0]
-				protocol = api.Protocol(strings.ToUpper(splits[1]))
+				protocol = splits[1]
 			}
 
-			if exist[portValue+string(protocol)] {
+			if exist[portValue+protocol] {
 				continue
 			}
 			komposePorts = append(komposePorts, kobject.Ports{
 				HostPort:      cast.ToInt32(portValue),
 				ContainerPort: cast.ToInt32(portValue),
 				HostIP:        "",
-				Protocol:      protocol,
+				Protocol:      strings.ToUpper(protocol),
 			})
 		}
 	}
@@ -229,9 +268,9 @@ func loadV3Ports(ports []types.ServicePortConfig, expose []string) []kobject.Por
 a Kubernetes-compatible format.
 */
 func parseHealthCheckReadiness(labels types.Labels) (kobject.HealthCheck, error) {
-	// initialize with CMD as default to not break at return (will be ignored if no test is informed)
-	test := []string{"CMD"}
-	var timeout, interval, retries, startPeriod int32
+	var test []string
+	var httpPath string
+	var httpPort, tcpPort, timeout, interval, retries, startPeriod int32
 	var disable bool
 
 	for key, value := range labels {
@@ -242,6 +281,12 @@ func parseHealthCheckReadiness(labels types.Labels) (kobject.HealthCheck, error)
 			if len(value) > 0 {
 				test, _ = shlex.Split(value)
 			}
+		case HealthCheckReadinessHTTPGetPath:
+			httpPath = value
+		case HealthCheckReadinessHTTPGetPort:
+			httpPort = cast.ToInt32(value)
+		case HealthCheckReadinessTCPPort:
+			tcpPort = cast.ToInt32(value)
 		case HealthCheckReadinessInterval:
 			parse, err := time.ParseDuration(value)
 			if err != nil {
@@ -265,17 +310,22 @@ func parseHealthCheckReadiness(labels types.Labels) (kobject.HealthCheck, error)
 		}
 	}
 
-	if test[0] == "NONE" {
-		disable = true
-		test = test[1:]
-	}
-	if test[0] == "CMD" || test[0] == "CMD-SHELL" {
-		test = test[1:]
+	if len(test) > 0 {
+		if test[0] == "NONE" {
+			disable = true
+			test = test[1:]
+		}
+		// Due to docker/cli adding "CMD-SHELL" to the struct, we remove the first element of composeHealthCheck.Test
+		if test[0] == "CMD" || test[0] == "CMD-SHELL" {
+			test = test[1:]
+		}
 	}
 
-	// Due to docker/cli adding "CMD-SHELL" to the struct, we remove the first element of composeHealthCheck.Test
 	return kobject.HealthCheck{
 		Test:        test,
+		HTTPPath:    httpPath,
+		HTTPPort:    httpPort,
+		TCPPort:     tcpPort,
 		Timeout:     timeout,
 		Interval:    interval,
 		Retries:     retries,
@@ -288,9 +338,8 @@ func parseHealthCheckReadiness(labels types.Labels) (kobject.HealthCheck, error)
 a Kubernetes-compatible format.
 */
 func parseHealthCheck(composeHealthCheck types.HealthCheckConfig, labels types.Labels) (kobject.HealthCheck, error) {
-	var timeout, interval, retries, startPeriod int32
+	var httpPort, tcpPort, timeout, interval, retries, startPeriod int32
 	var test []string
-	var httpPort int32
 	var httpPath string
 
 	// Here we convert the timeout from 1h30s (example) to 36030 seconds.
@@ -332,12 +381,15 @@ func parseHealthCheck(composeHealthCheck types.HealthCheckConfig, labels types.L
 			httpPath = value
 		case HealthCheckLivenessHTTPGetPort:
 			httpPort = cast.ToInt32(value)
+		case HealthCheckLivenessTCPPort:
+			tcpPort = cast.ToInt32(value)
 		}
 	}
 
 	// Due to docker/cli adding "CMD-SHELL" to the struct, we remove the first element of composeHealthCheck.Test
 	return kobject.HealthCheck{
 		Test:        test,
+		TCPPort:     tcpPort,
 		HTTPPath:    httpPath,
 		HTTPPort:    httpPort,
 		Timeout:     timeout,
@@ -366,7 +418,7 @@ func dockerComposeToKomposeMapping(composeObject *types.Config) (kobject.Kompose
 		serviceConfig.Name = name
 		serviceConfig.Image = composeServiceConfig.Image
 		serviceConfig.WorkingDir = composeServiceConfig.WorkingDir
-		serviceConfig.Annotations = map[string]string(composeServiceConfig.Labels)
+		serviceConfig.Annotations = composeServiceConfig.Labels
 		serviceConfig.CapAdd = composeServiceConfig.CapAdd
 		serviceConfig.CapDrop = composeServiceConfig.CapDrop
 		serviceConfig.Expose = composeServiceConfig.Expose
@@ -410,7 +462,7 @@ func dockerComposeToKomposeMapping(composeObject *types.Config) (kobject.Kompose
 
 		// HealthCheck Readiness
 		var readiness, errReadiness = parseHealthCheckReadiness(*&composeServiceConfig.Labels)
-		if readiness.Test != nil && len(readiness.Test) > 0 && len(readiness.Test[0]) > 0 && !readiness.Disable {
+		if !readiness.Disable {
 			serviceConfig.HealthChecks.Readiness = readiness
 			if errReadiness != nil {
 				return kobject.KomposeObject{}, errors.Wrap(errReadiness, "Unable to parse health check")
@@ -434,7 +486,7 @@ func dockerComposeToKomposeMapping(composeObject *types.Config) (kobject.Kompose
 		}
 
 		// placement:
-		serviceConfig.Placement = loadV3Placement(composeServiceConfig.Deploy.Placement.Constraints)
+		serviceConfig.Placement = loadV3Placement(composeServiceConfig.Deploy.Placement)
 
 		if composeServiceConfig.Deploy.UpdateConfig != nil {
 			serviceConfig.DeployUpdateConfig = *composeServiceConfig.Deploy.UpdateConfig
@@ -725,6 +777,9 @@ func mergeComposeObject(oldCompose *types.Config, newCompose *types.Config) (*ty
 		if service.Deploy.Resources.Reservations != nil {
 			tmpOldService.Deploy.Resources.Reservations = service.Deploy.Resources.Reservations
 		}
+		if service.Deploy.Replicas != nil {
+			tmpOldService.Deploy.Replicas = service.Deploy.Replicas
+		}
 
 		if len(service.Devices) != 0 {
 			// merge the 2 sets of values
@@ -732,6 +787,7 @@ func mergeComposeObject(oldCompose *types.Config, newCompose *types.Config) (*ty
 			// Not implemented yet as we don't convert devices to k8s anyway
 			tmpOldService.Devices = service.Devices
 		}
+
 		if len(service.DNS) != 0 {
 			// concat the 2 sets of values
 			tmpOldService.DNS = append(tmpOldService.DNS, service.DNS...)
@@ -775,6 +831,7 @@ func mergeComposeObject(oldCompose *types.Config, newCompose *types.Config) (*ty
 		if service.Image != "" {
 			tmpOldService.Image = service.Image
 		}
+
 		if service.Ipc != "" {
 			tmpOldService.Ipc = service.Ipc
 		}

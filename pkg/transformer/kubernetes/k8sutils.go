@@ -45,7 +45,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/util/intstr"
 )
 
 /**
@@ -199,7 +198,7 @@ func PrintList(objects []runtime.Object, opt kobject.ConvertOptions) error {
 		list := &api.List{}
 		// convert objects to versioned and add them to list
 		for _, object := range objects {
-			versionedObject, err := convertToVersion(object, metav1.GroupVersion{})
+			versionedObject, err := convertToVersion(object)
 			if err != nil {
 				return err
 			}
@@ -207,10 +206,9 @@ func PrintList(objects []runtime.Object, opt kobject.ConvertOptions) error {
 			list.Items = append(list.Items, objectToRaw(versionedObject))
 		}
 		// version list itself
-		listVersion := metav1.GroupVersion{Group: "", Version: "v1"}
 		list.Kind = "List"
 		list.APIVersion = "v1"
-		convertedList, err := convertToVersion(list, listVersion)
+		convertedList, err := convertToVersion(list)
 		if err != nil {
 			return err
 		}
@@ -236,7 +234,7 @@ func PrintList(objects []runtime.Object, opt kobject.ConvertOptions) error {
 		var file string
 		// create a separate file for each provider
 		for _, v := range objects {
-			versionedObject, err := convertToVersion(v, metav1.GroupVersion{})
+			versionedObject, err := convertToVersion(v)
 			if err != nil {
 				return err
 			}
@@ -340,7 +338,7 @@ func marshalWithIndent(o interface{}, indent int) ([]byte, error) {
 
 // Convert object to versioned object
 // if groupVersion is  empty (metav1.GroupVersion{}), use version from original object (obj)
-func convertToVersion(obj runtime.Object, groupVersion metav1.GroupVersion) (runtime.Object, error) {
+func convertToVersion(obj runtime.Object) (runtime.Object, error) {
 	// ignore unstruct object
 	if _, ok := obj.(*unstructured.Unstructured); ok {
 		return obj, nil
@@ -368,9 +366,25 @@ func (k *Kubernetes) PortsExist(service kobject.ServiceConfig) bool {
 	return len(service.Port) != 0
 }
 
-func (k *Kubernetes) CreateLBService(name string, service kobject.ServiceConfig, objects []runtime.Object) []*api.Service {
+func (k *Kubernetes) initSvcObject(name string, service kobject.ServiceConfig, ports []api.ServicePort) *api.Service {
+	svc := k.InitSvc(name, service)
+	// special case, only for loaderbalancer type
+	svc.Name = name
+	svc.Spec.Selector = transformer.ConfigLabels(service.Name)
+
+	svc.Spec.Ports = ports
+	svc.Spec.Type = api.ServiceType(service.ServiceType)
+
+	// Configure annotations
+	annotations := transformer.ConfigAnnotations(service)
+	svc.ObjectMeta.Annotations = annotations
+
+	return svc
+}
+
+func (k *Kubernetes) CreateLBService(name string, service kobject.ServiceConfig) []*api.Service {
 	var svcs []*api.Service
-	tcpPorts, udpPorts := k.ConfigLBServicePorts(name, service)
+	tcpPorts, udpPorts := k.ConfigLBServicePorts(service)
 	if tcpPorts != nil {
 		svc := k.initSvcObject(name+"-tcp", service, tcpPorts)
 		svcs = append(svcs, svc)
@@ -382,25 +396,12 @@ func (k *Kubernetes) CreateLBService(name string, service kobject.ServiceConfig,
 	return svcs
 }
 
-func (k *Kubernetes) initSvcObject(name string, service kobject.ServiceConfig, ports []api.ServicePort) *api.Service {
-	svc := k.InitSvc(name, service)
-	svc.Spec.Ports = ports
-
-	svc.Spec.Type = api.ServiceType(service.ServiceType)
-
-	// Configure annotations
-	annotations := transformer.ConfigAnnotations(service)
-	svc.ObjectMeta.Annotations = annotations
-
-	return svc
-}
-
 // CreateService creates a k8s service
-func (k *Kubernetes) CreateService(name string, service kobject.ServiceConfig, objects []runtime.Object) *api.Service {
+func (k *Kubernetes) CreateService(name string, service kobject.ServiceConfig) *api.Service {
 	svc := k.InitSvc(name, service)
 
 	// Configure the service ports.
-	servicePorts := k.ConfigServicePorts(name, service)
+	servicePorts := k.ConfigServicePorts(service)
 	svc.Spec.Ports = servicePorts
 
 	if service.ServiceType == "Headless" {
@@ -422,10 +423,10 @@ func (k *Kubernetes) CreateService(name string, service kobject.ServiceConfig, o
 // and without Service Pods can't find each other using DNS names.
 // Instead of regular Kubernetes Service we create Headless Service. DNS of such service points directly to Pod IP address.
 // You can find more about Headless Services in Kubernetes documentation https://kubernetes.io/docs/user-guide/services/#headless-services
-func (k *Kubernetes) CreateHeadlessService(name string, service kobject.ServiceConfig, objects []runtime.Object) *api.Service {
+func (k *Kubernetes) CreateHeadlessService(name string, service kobject.ServiceConfig) *api.Service {
 	svc := k.InitSvc(name, service)
 
-	servicePorts := []api.ServicePort{}
+	var servicePorts []api.ServicePort
 	// Configure a dummy port: https://github.com/kubernetes/kubernetes/issues/32766.
 	servicePorts = append(servicePorts, api.ServicePort{
 		Name: "headless",
@@ -441,7 +442,7 @@ func (k *Kubernetes) CreateHeadlessService(name string, service kobject.ServiceC
 
 	return svc
 }
-func (k *Kubernetes) UpdateKubernetesObjectsMultipleContainers(name string, service kobject.ServiceConfig, opt kobject.ConvertOptions, objects *[]runtime.Object, podSpec PodSpec) error {
+func (k *Kubernetes) UpdateKubernetesObjectsMultipleContainers(name string, service kobject.ServiceConfig, objects *[]runtime.Object, podSpec PodSpec) error {
 	// Configure annotations
 	annotations := transformer.ConfigAnnotations(service)
 
@@ -478,7 +479,7 @@ func (k *Kubernetes) UpdateKubernetesObjectsMultipleContainers(name string, serv
 // UpdateKubernetesObjects loads configurations to k8s objects
 func (k *Kubernetes) UpdateKubernetesObjects(name string, service kobject.ServiceConfig, opt kobject.ConvertOptions, objects *[]runtime.Object) error {
 	// Configure the environment variables.
-	envs, err := ConfigEnvs(name, service, opt)
+	envs, err := ConfigEnvs(service, opt)
 	if err != nil {
 		return errors.Wrap(err, "Unable to load env variables")
 	}
@@ -491,13 +492,11 @@ func (k *Kubernetes) UpdateKubernetesObjects(name string, service kobject.Servic
 	// Configure Tmpfs
 	if len(service.TmpFs) > 0 {
 		TmpVolumesMount, TmpVolumes := k.ConfigTmpfs(name, service)
-
 		volumes = append(volumes, TmpVolumes...)
-
 		volumesMount = append(volumesMount, TmpVolumesMount...)
 	}
 
-	if pvc != nil {
+	if pvc != nil && opt.Controller != StatefulStateController {
 		// Looping on the slice pvc instead of `*objects = append(*objects, pvc...)`
 		// because the type of objects and pvc is different, but when doing append
 		// one element at a time it gets converted to runtime.Object for objects slice
@@ -513,7 +512,7 @@ func (k *Kubernetes) UpdateKubernetesObjects(name string, service kobject.Servic
 	}
 
 	// Configure the container ports.
-	ports := ConfigPorts(name, service)
+	ports := ConfigPorts(service)
 
 	// Configure capabilities
 	capabilities := ConfigCapabilities(service)
@@ -523,9 +522,7 @@ func (k *Kubernetes) UpdateKubernetesObjects(name string, service kobject.Servic
 
 	// fillTemplate fills the pod template with the value calculated from config
 	fillTemplate := func(template *api.PodTemplateSpec) error {
-		if len(service.ContainerName) > 0 {
-			template.Spec.Containers[0].Name = FormatContainerName(service.ContainerName)
-		}
+		template.Spec.Containers[0].Name = GetContainerName(service)
 		template.Spec.Containers[0].Env = envs
 		template.Spec.Containers[0].Command = service.Command
 		template.Spec.Containers[0].Args = service.Args
@@ -533,65 +530,14 @@ func (k *Kubernetes) UpdateKubernetesObjects(name string, service kobject.Servic
 		template.Spec.Containers[0].VolumeMounts = append(template.Spec.Containers[0].VolumeMounts, volumesMount...)
 		template.Spec.Containers[0].Stdin = service.Stdin
 		template.Spec.Containers[0].TTY = service.Tty
-		template.Spec.Volumes = append(template.Spec.Volumes, volumes...)
-		template.Spec.NodeSelector = service.Placement
+		if opt.Controller != StatefulStateController || opt.Volumes == "configMap" {
+			template.Spec.Volumes = append(template.Spec.Volumes, volumes...)
+		}
+		template.Spec.Affinity = ConfigAffinity(service)
+		template.Spec.TopologySpreadConstraints = ConfigTopologySpreadConstraints(service)
 		// Configure the HealthCheck
-		// We check to see if it's blank
-		if !reflect.DeepEqual(service.HealthChecks.Liveness, kobject.HealthCheck{}) {
-			probe := api.Probe{}
-
-			if len(service.HealthChecks.Liveness.Test) > 0 {
-				probe.Handler = api.Handler{
-					Exec: &api.ExecAction{
-						Command: service.HealthChecks.Liveness.Test,
-					},
-				}
-			} else if !reflect.ValueOf(service.HealthChecks.Liveness.HTTPPath).IsZero() &&
-				!reflect.ValueOf(service.HealthChecks.Liveness.HTTPPort).IsZero() {
-				probe.Handler = api.Handler{
-					HTTPGet: &api.HTTPGetAction{
-						Path: service.HealthChecks.Liveness.HTTPPath,
-						Port: intstr.FromInt(int(service.HealthChecks.Liveness.HTTPPort)),
-					},
-				}
-			} else {
-				return errors.New("Health check must contain a command")
-			}
-
-			probe.TimeoutSeconds = service.HealthChecks.Liveness.Timeout
-			probe.PeriodSeconds = service.HealthChecks.Liveness.Interval
-			probe.FailureThreshold = service.HealthChecks.Liveness.Retries
-
-			// See issue: https://github.com/docker/cli/issues/116
-			// StartPeriod has been added to docker/cli however, it is not yet added
-			// to compose. Once the feature has been implemented, this will automatically work
-			probe.InitialDelaySeconds = service.HealthChecks.Liveness.StartPeriod
-
-			template.Spec.Containers[0].LivenessProbe = &probe
-		}
-		if !reflect.DeepEqual(service.HealthChecks.Readiness, kobject.HealthCheck{}) {
-			probeHealthCheckReadiness := api.Probe{}
-			if len(service.HealthChecks.Readiness.Test) > 0 {
-				probeHealthCheckReadiness.Handler = api.Handler{
-					Exec: &api.ExecAction{
-						Command: service.HealthChecks.Readiness.Test,
-					},
-				}
-			} else {
-				return errors.New("Health check must contain a command")
-			}
-
-			probeHealthCheckReadiness.TimeoutSeconds = service.HealthChecks.Readiness.Timeout
-			probeHealthCheckReadiness.PeriodSeconds = service.HealthChecks.Readiness.Interval
-			probeHealthCheckReadiness.FailureThreshold = service.HealthChecks.Readiness.Retries
-
-			// See issue: https://github.com/docker/cli/issues/116
-			// StartPeriod has been added to docker/cli however, it is not yet added
-			// to compose. Once the feature has been implemented, this will automatically work
-			probeHealthCheckReadiness.InitialDelaySeconds = service.HealthChecks.Readiness.StartPeriod
-
-			template.Spec.Containers[0].ReadinessProbe = &probeHealthCheckReadiness
-		}
+		template.Spec.Containers[0].LivenessProbe = configProbe(service.HealthChecks.Liveness)
+		template.Spec.Containers[0].ReadinessProbe = configProbe(service.HealthChecks.Readiness)
 
 		if service.StopGracePeriod != "" {
 			template.Spec.TerminationGracePeriodSeconds, err = DurationStrToSecondsInt(service.StopGracePeriod)
@@ -694,23 +640,69 @@ func (k *Kubernetes) UpdateKubernetesObjects(name string, service kobject.Servic
 				objType.Spec.Strategy.Type = appsv1.RecreateDeploymentStrategyType
 			case *deployapi.DeploymentConfig:
 				objType.Spec.Strategy.Type = deployapi.DeploymentStrategyTypeRecreate
+			case *appsv1.StatefulSet:
+				// embed all PVCs inside the StatefulSet object
+				if opt.Volumes == "configMap" {
+					break
+				}
+				persistentVolumeClaims := make([]api.PersistentVolumeClaim, len(pvc))
+				for i, persistentVolumeClaim := range pvc {
+					persistentVolumeClaims[i] = *persistentVolumeClaim
+					persistentVolumeClaims[i].APIVersion = ""
+					persistentVolumeClaims[i].Kind = ""
+				}
+				objType.Spec.VolumeClaimTemplates = persistentVolumeClaims
 			}
 		}
 	}
 	return nil
 }
 
-// KomposeObjectToServiceConfigGroupMapping returns the service config group by name
-func KomposeObjectToServiceConfigGroupMapping(komposeObject kobject.KomposeObject) map[string]kobject.ServiceConfigGroup {
+// getServiceVolumesID create a unique id for the service's volume mounts
+func getServiceVolumesID(service kobject.ServiceConfig) string {
+	id := ""
+	for _, v := range service.VolList {
+		id += v
+	}
+	return id
+}
+
+// getServiceGroupID ...
+// return empty string should mean this service should go alone
+func getServiceGroupID(service kobject.ServiceConfig, mode string) string {
+	if mode == "label" {
+		return service.Labels[compose.LabelServiceGroup]
+	}
+	if mode == "volume" {
+		return getServiceVolumesID(service)
+	}
+	return ""
+}
+
+// KomposeObjectToServiceConfigGroupMapping returns the service config group by name or by volume
+// This group function works as following
+// 1. Support two mode
+//   (1): label: use a custom label, the service that contains it will be merged to one workload.
+//   (2): volume: the service that share to exactly same volume config will be merged to one workload. If use pvc, only
+//                 create one for this group.
+// 2. If service containers restart policy and no workload argument provide and it's restart policy looks like a pod, then
+//    this service should generate a pod. If group mode specified, it should be grouped and ignore the restart policy.
+// 3. If group mode specified, port conflict between services in one group will be ignored, and multiple service should be created.
+// 4. If `volume` group mode specified, we don't have an appropriate name for this combined service, use the first one for now.
+//    A warn/info message should be printed to let the user know.
+func KomposeObjectToServiceConfigGroupMapping(komposeObject *kobject.KomposeObject, opt kobject.ConvertOptions) map[string]kobject.ServiceConfigGroup {
 	serviceConfigGroup := make(map[string]kobject.ServiceConfigGroup)
+
 	for name, service := range komposeObject.ServiceConfigs {
-		if groupID, ok := service.Labels[compose.LabelServiceGroup]; ok {
+		groupID := getServiceGroupID(service, opt.ServiceGroupMode)
+		if groupID != "" {
 			service.Name = name
+			service.InGroup = true
 			serviceConfigGroup[groupID] = append(serviceConfigGroup[groupID], service)
-		} else {
-			serviceConfigGroup[name] = append(serviceConfigGroup[name], service)
+			komposeObject.ServiceConfigs[name] = service
 		}
 	}
+
 	return serviceConfigGroup
 }
 
@@ -798,7 +790,7 @@ func (k *Kubernetes) SortServicesFirst(objs *[]runtime.Object) {
 }
 
 // RemoveDupObjects remove objects that are dups...eg. configmaps from env.
-// since we know for sure that the duplication can only happens on ConfigMap, so
+// since we know for sure that the duplication can only happen on ConfigMap, so
 // this code will looks like this for now.
 // + NetworkPolicy
 func (k *Kubernetes) RemoveDupObjects(objs *[]runtime.Object) {
@@ -893,6 +885,14 @@ func FormatFileName(name string) string {
 //FormatContainerName format Container name
 func FormatContainerName(name string) string {
 	name = strings.Replace(name, "_", "-", -1)
+	return name
+}
+
+func GetContainerName(service kobject.ServiceConfig) string {
+	name := service.Name
+	if len(service.ContainerName) > 0 {
+		name = FormatContainerName(service.ContainerName)
+	}
 	return name
 }
 

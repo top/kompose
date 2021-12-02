@@ -41,61 +41,157 @@ func durationTypesPtr(value time.Duration) *types.Duration {
 
 func TestParseHealthCheck(t *testing.T) {
 	helperValue := uint64(2)
-	check := types.HealthCheckConfig{
-		Test:        []string{"CMD-SHELL", "echo", "foobar"},
-		Timeout:     durationTypesPtr(1 * time.Second),
-		Interval:    durationTypesPtr(2 * time.Second),
-		Retries:     &helperValue,
-		StartPeriod: durationTypesPtr(3 * time.Second),
+	type input struct {
+		healthCheck types.HealthCheckConfig
+		labels      types.Labels
+	}
+	testCases := map[string]struct {
+		input    input
+		expected kobject.HealthCheck
+	}{
+		"Exec": {
+			input: input{
+				healthCheck: types.HealthCheckConfig{
+					Test:        []string{"CMD-SHELL", "echo", "foobar"},
+					Timeout:     durationTypesPtr(1 * time.Second),
+					Interval:    durationTypesPtr(2 * time.Second),
+					Retries:     &helperValue,
+					StartPeriod: durationTypesPtr(3 * time.Second),
+				},
+			},
+			// CMD-SHELL or SHELL is included Test within docker/cli, thus we remove the first value in Test
+			expected: kobject.HealthCheck{
+				Test:        []string{"echo", "foobar"},
+				Timeout:     1,
+				Interval:    2,
+				Retries:     2,
+				StartPeriod: 3,
+			},
+		},
+		"HTTPGet": {
+			input: input{
+				healthCheck: types.HealthCheckConfig{
+					Timeout:     durationTypesPtr(1 * time.Second),
+					Interval:    durationTypesPtr(2 * time.Second),
+					Retries:     &helperValue,
+					StartPeriod: durationTypesPtr(3 * time.Second),
+				},
+				labels: types.Labels{
+					"kompose.service.healthcheck.liveness.http_get_path": "/health",
+					"kompose.service.healthcheck.liveness.http_get_port": "8080",
+				},
+			},
+			expected: kobject.HealthCheck{
+				HTTPPath:    "/health",
+				HTTPPort:    8080,
+				Timeout:     1,
+				Interval:    2,
+				Retries:     2,
+				StartPeriod: 3,
+			},
+		},
+		"TCPSocket": {
+			input: input{
+				healthCheck: types.HealthCheckConfig{
+					Timeout:     durationTypesPtr(1 * time.Second),
+					Interval:    durationTypesPtr(2 * time.Second),
+					Retries:     &helperValue,
+					StartPeriod: durationTypesPtr(3 * time.Second),
+				},
+				labels: types.Labels{
+					"kompose.service.healthcheck.liveness.tcp_port": "8080",
+				},
+			},
+			expected: kobject.HealthCheck{
+				TCPPort:     8080,
+				Timeout:     1,
+				Interval:    2,
+				Retries:     2,
+				StartPeriod: 3,
+			},
+		},
 	}
 
-	// CMD-SHELL or SHELL is included Test within docker/cli, thus we remove the first value in Test
-	expected := kobject.HealthCheck{
-		Test:        []string{"echo", "foobar"},
-		Timeout:     1,
-		Interval:    2,
-		Retries:     2,
-		StartPeriod: 3,
-	}
-	output, err := parseHealthCheck(check, nil)
-	if err != nil {
-		t.Errorf("Unable to convert HealthCheckConfig: %s", err)
-	}
+	for name, testCase := range testCases {
+		t.Log("Test case:", name)
+		output, err := parseHealthCheck(testCase.input.healthCheck, testCase.input.labels)
+		if err != nil {
+			t.Errorf("Unable to convert HealthCheckConfig: %s", err)
+		}
 
-	if !reflect.DeepEqual(output, expected) {
-		t.Errorf("Structs are not equal, expected: %v, output: %v", expected, output)
+		if !reflect.DeepEqual(output, testCase.expected) {
+			t.Errorf("Structs are not equal, expected: %v, output: %v", testCase.expected, output)
+		}
 	}
 }
 
-func TestParseHttpHealthCheck(t *testing.T) {
-	helperValue := uint64(2)
-	check := types.HealthCheckConfig{
-		Timeout:     durationTypesPtr(1 * time.Second),
-		Interval:    durationTypesPtr(2 * time.Second),
-		Retries:     &helperValue,
-		StartPeriod: durationTypesPtr(3 * time.Second),
-	}
-	label := types.Labels{
-		HealthCheckLivenessHTTPGetPath: "ping",
-		HealthCheckLivenessHTTPGetPort: "80",
+func TestParseHealthCheckReadiness(t *testing.T) {
+	testCases := map[string]struct {
+		input    types.Labels
+		expected kobject.HealthCheck
+	}{
+		"Exec": {
+			input: types.Labels{
+				"kompose.service.healthcheck.readiness.test":         "echo foobar",
+				"kompose.service.healthcheck.readiness.timeout":      "1s",
+				"kompose.service.healthcheck.readiness.interval":     "2s",
+				"kompose.service.healthcheck.readiness.retries":      "2",
+				"kompose.service.healthcheck.readiness.start_period": "3s",
+			},
+			expected: kobject.HealthCheck{
+				Test:        []string{"echo", "foobar"},
+				Timeout:     1,
+				Interval:    2,
+				Retries:     2,
+				StartPeriod: 3,
+			},
+		},
+		"HTTPGet": {
+			input: types.Labels{
+				"kompose.service.healthcheck.readiness.http_get_path": "/ready",
+				"kompose.service.healthcheck.readiness.http_get_port": "8080",
+				"kompose.service.healthcheck.readiness.timeout":       "1s",
+				"kompose.service.healthcheck.readiness.interval":      "2s",
+				"kompose.service.healthcheck.readiness.retries":       "2",
+				"kompose.service.healthcheck.readiness.start_period":  "3s",
+			},
+			expected: kobject.HealthCheck{
+				HTTPPath:    "/ready",
+				HTTPPort:    8080,
+				Timeout:     1,
+				Interval:    2,
+				Retries:     2,
+				StartPeriod: 3,
+			},
+		},
+		"TCPSocket": {
+			input: types.Labels{
+				"kompose.service.healthcheck.readiness.tcp_port":     "8080",
+				"kompose.service.healthcheck.readiness.timeout":      "1s",
+				"kompose.service.healthcheck.readiness.interval":     "2s",
+				"kompose.service.healthcheck.readiness.retries":      "2",
+				"kompose.service.healthcheck.readiness.start_period": "3s",
+			},
+			expected: kobject.HealthCheck{
+				TCPPort:     8080,
+				Timeout:     1,
+				Interval:    2,
+				Retries:     2,
+				StartPeriod: 3,
+			},
+		},
 	}
 
-	// CMD-SHELL or SHELL is included Test within docker/cli, thus we remove the first value in Test
-	expected := kobject.HealthCheck{
-		HTTPPath:    "ping",
-		HTTPPort:    80,
-		Timeout:     1,
-		Interval:    2,
-		Retries:     2,
-		StartPeriod: 3,
-	}
-	output, err := parseHealthCheck(check, label)
-	if err != nil {
-		t.Errorf("Unable to convert HealthCheckConfig: %s", err)
-	}
+	for name, testCase := range testCases {
+		t.Log("Test case:", name)
+		output, err := parseHealthCheckReadiness(testCase.input)
+		if err != nil {
+			t.Errorf("Unable to convert HealthCheckConfig: %s", err)
+		}
 
-	if !reflect.DeepEqual(output, expected) {
-		t.Errorf("Structs are not equal, expected: %v, output: %v", expected, output)
+		if !reflect.DeepEqual(output, testCase.expected) {
+			t.Errorf("Structs are not equal, expected: %v, output: %v", testCase.expected, output)
+		}
 	}
 }
 
@@ -124,20 +220,20 @@ func TestLoadV3Ports(t *testing.T) {
 	}{
 		{
 			desc:   "ports with expose",
-			ports:  []types.ServicePortConfig{{Target: 80, Published: 80, Protocol: "TCP"}},
+			ports:  []types.ServicePortConfig{{Target: 80, Published: 80, Protocol: string(api.ProtocolTCP)}},
 			expose: []string{"80", "8080"},
 			want: []kobject.Ports{
-				{HostPort: 80, ContainerPort: 80, Protocol: api.Protocol("TCP")},
-				{HostPort: 8080, ContainerPort: 8080, Protocol: api.Protocol("TCP")},
+				{HostPort: 80, ContainerPort: 80, Protocol: string(api.ProtocolTCP)},
+				{HostPort: 8080, ContainerPort: 8080, Protocol: string(api.ProtocolTCP)},
 			},
 		},
 		{
 			desc:   "exposed port including /protocol",
-			ports:  []types.ServicePortConfig{{Target: 80, Published: 80, Protocol: "TCP"}},
+			ports:  []types.ServicePortConfig{{Target: 80, Published: 80, Protocol: string(api.ProtocolTCP)}},
 			expose: []string{"80/udp"},
 			want: []kobject.Ports{
-				{HostPort: 80, ContainerPort: 80, Protocol: api.Protocol("TCP")},
-				{HostPort: 80, ContainerPort: 80, Protocol: api.Protocol("UDP")},
+				{HostPort: 80, ContainerPort: 80, Protocol: string(api.ProtocolTCP)},
+				{HostPort: 80, ContainerPort: 80, Protocol: string(api.ProtocolUDP)},
 			},
 		},
 	} {
@@ -187,74 +283,74 @@ func TestLoadPorts(t *testing.T) {
 		{
 			ports: []string{"127.0.0.1:80:80/tcp"},
 			want: []kobject.Ports{
-				{HostIP: "127.0.0.1", HostPort: 80, ContainerPort: 80, Protocol: api.ProtocolTCP},
+				{HostIP: "127.0.0.1", HostPort: 80, ContainerPort: 80, Protocol: string(api.ProtocolTCP)},
 			},
 		},
 		{
 			ports: []string{"80:80/tcp"},
 			want: []kobject.Ports{
-				{HostPort: 80, ContainerPort: 80, Protocol: api.ProtocolTCP},
+				{HostPort: 80, ContainerPort: 80, Protocol: string(api.ProtocolTCP)},
 			},
 		},
 		{
 			ports: []string{"80:80"},
 			want: []kobject.Ports{
-				{HostPort: 80, ContainerPort: 80, Protocol: api.ProtocolTCP},
+				{HostPort: 80, ContainerPort: 80, Protocol: string(api.ProtocolTCP)},
 			},
 		},
 		{
 			ports: []string{"80"},
 			want: []kobject.Ports{
-				{ContainerPort: 80, Protocol: api.ProtocolTCP},
+				{ContainerPort: 80, Protocol: string(api.ProtocolTCP)},
 			},
 		},
 		{
 			ports: []string{"3000-3005"},
 			want: []kobject.Ports{
-				{ContainerPort: 3000, Protocol: api.ProtocolTCP},
-				{ContainerPort: 3001, Protocol: api.ProtocolTCP},
-				{ContainerPort: 3002, Protocol: api.ProtocolTCP},
-				{ContainerPort: 3003, Protocol: api.ProtocolTCP},
-				{ContainerPort: 3004, Protocol: api.ProtocolTCP},
-				{ContainerPort: 3005, Protocol: api.ProtocolTCP},
+				{ContainerPort: 3000, Protocol: string(api.ProtocolTCP)},
+				{ContainerPort: 3001, Protocol: string(api.ProtocolTCP)},
+				{ContainerPort: 3002, Protocol: string(api.ProtocolTCP)},
+				{ContainerPort: 3003, Protocol: string(api.ProtocolTCP)},
+				{ContainerPort: 3004, Protocol: string(api.ProtocolTCP)},
+				{ContainerPort: 3005, Protocol: string(api.ProtocolTCP)},
 			},
 		},
 		{
 			ports: []string{"3000-3005:5000-5005"},
 			want: []kobject.Ports{
-				{HostPort: 3000, ContainerPort: 5000, Protocol: api.ProtocolTCP},
-				{HostPort: 3001, ContainerPort: 5001, Protocol: api.ProtocolTCP},
-				{HostPort: 3002, ContainerPort: 5002, Protocol: api.ProtocolTCP},
-				{HostPort: 3003, ContainerPort: 5003, Protocol: api.ProtocolTCP},
-				{HostPort: 3004, ContainerPort: 5004, Protocol: api.ProtocolTCP},
-				{HostPort: 3005, ContainerPort: 5005, Protocol: api.ProtocolTCP},
+				{HostPort: 3000, ContainerPort: 5000, Protocol: string(api.ProtocolTCP)},
+				{HostPort: 3001, ContainerPort: 5001, Protocol: string(api.ProtocolTCP)},
+				{HostPort: 3002, ContainerPort: 5002, Protocol: string(api.ProtocolTCP)},
+				{HostPort: 3003, ContainerPort: 5003, Protocol: string(api.ProtocolTCP)},
+				{HostPort: 3004, ContainerPort: 5004, Protocol: string(api.ProtocolTCP)},
+				{HostPort: 3005, ContainerPort: 5005, Protocol: string(api.ProtocolTCP)},
 			},
 		},
 		{
 			ports: []string{"127.0.0.1:3000-3005:5000-5005"},
 			want: []kobject.Ports{
-				{HostIP: "127.0.0.1", HostPort: 3000, ContainerPort: 5000, Protocol: api.ProtocolTCP},
-				{HostIP: "127.0.0.1", HostPort: 3001, ContainerPort: 5001, Protocol: api.ProtocolTCP},
-				{HostIP: "127.0.0.1", HostPort: 3002, ContainerPort: 5002, Protocol: api.ProtocolTCP},
-				{HostIP: "127.0.0.1", HostPort: 3003, ContainerPort: 5003, Protocol: api.ProtocolTCP},
-				{HostIP: "127.0.0.1", HostPort: 3004, ContainerPort: 5004, Protocol: api.ProtocolTCP},
-				{HostIP: "127.0.0.1", HostPort: 3005, ContainerPort: 5005, Protocol: api.ProtocolTCP},
+				{HostIP: "127.0.0.1", HostPort: 3000, ContainerPort: 5000, Protocol: string(api.ProtocolTCP)},
+				{HostIP: "127.0.0.1", HostPort: 3001, ContainerPort: 5001, Protocol: string(api.ProtocolTCP)},
+				{HostIP: "127.0.0.1", HostPort: 3002, ContainerPort: 5002, Protocol: string(api.ProtocolTCP)},
+				{HostIP: "127.0.0.1", HostPort: 3003, ContainerPort: 5003, Protocol: string(api.ProtocolTCP)},
+				{HostIP: "127.0.0.1", HostPort: 3004, ContainerPort: 5004, Protocol: string(api.ProtocolTCP)},
+				{HostIP: "127.0.0.1", HostPort: 3005, ContainerPort: 5005, Protocol: string(api.ProtocolTCP)},
 			},
 		},
 		{
 			ports: []string{"80", "3000"},
 			want: []kobject.Ports{
-				{HostPort: 0, ContainerPort: 80, Protocol: api.ProtocolTCP},
-				{HostPort: 0, ContainerPort: 3000, Protocol: api.ProtocolTCP},
+				{HostPort: 0, ContainerPort: 80, Protocol: string(api.ProtocolTCP)},
+				{HostPort: 0, ContainerPort: 3000, Protocol: string(api.ProtocolTCP)},
 			},
 		},
 		{
 			ports:  []string{"80", "3000"},
 			expose: []string{"80", "8080"},
 			want: []kobject.Ports{
-				{HostPort: 0, ContainerPort: 80, Protocol: api.ProtocolTCP},
-				{HostPort: 0, ContainerPort: 3000, Protocol: api.ProtocolTCP},
-				{HostPort: 0, ContainerPort: 8080, Protocol: api.ProtocolTCP},
+				{HostPort: 0, ContainerPort: 80, Protocol: string(api.ProtocolTCP)},
+				{HostPort: 0, ContainerPort: 3000, Protocol: string(api.ProtocolTCP)},
+				{HostPort: 0, ContainerPort: 8080, Protocol: string(api.ProtocolTCP)},
 			},
 		},
 	}
@@ -499,12 +595,47 @@ func TestCheckPlacementCustomLabels(t *testing.T) {
 			"node.labels.something == anything",
 			"node.labels.monitor != xxx",
 		},
+		Preferences: []types.PlacementPreferences{
+			{Spread: "node.labels.zone"},
+			{Spread: "foo"},
+			{Spread: "node.labels.ssd"},
+		},
 	}
-	output := loadV3Placement(placement.Constraints)
+	output := loadV3Placement(placement)
 
-	expected := map[string]string{"something": "anything"}
+	expected := kobject.Placement{
+		PositiveConstraints: map[string]string{
+			"something": "anything",
+		},
+		NegativeConstraints: map[string]string{
+			"monitor": "xxx",
+		},
+		Preferences: []string{
+			"zone", "ssd",
+		},
+	}
 
-	if output["something"] != expected["something"] {
-		t.Errorf("Expected %s, got %s", expected, output)
+	checkConstraints(t, "positive", output.PositiveConstraints, expected.PositiveConstraints)
+	checkConstraints(t, "negative", output.NegativeConstraints, expected.NegativeConstraints)
+
+	if len(output.Preferences) != len(expected.Preferences) {
+		t.Errorf("preferences len is not equal, expected %d, got %d", len(expected.Preferences), len(output.Preferences))
+	}
+	for i := range output.Preferences {
+		if output.Preferences[i] != expected.Preferences[i] {
+			t.Errorf("preference is not equal, expected %s, got %s", expected.Preferences[i], output.Preferences[i])
+		}
+	}
+}
+
+func checkConstraints(t *testing.T, caseName string, output, expected map[string]string) {
+	t.Log("Test case:", caseName)
+	if len(output) != len(expected) {
+		t.Errorf("constraints len is not equal, expected %d, got %d", len(expected), len(output))
+	}
+	for key := range output {
+		if output[key] != expected[key] {
+			t.Errorf("%s constraint is not equal, expected %s, got %s", key, expected[key], output[key])
+		}
 	}
 }

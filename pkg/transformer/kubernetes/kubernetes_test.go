@@ -23,6 +23,8 @@ import (
 	"strings"
 	"testing"
 
+	dockerCliTypes "github.com/docker/cli/cli/compose/types"
+
 	"github.com/kubernetes/kompose/pkg/kobject"
 	"github.com/kubernetes/kompose/pkg/loader/compose"
 	"github.com/kubernetes/kompose/pkg/transformer"
@@ -38,30 +40,41 @@ import (
 
 func newServiceConfig() kobject.ServiceConfig {
 	return kobject.ServiceConfig{
+		Name:            "app",
+		ContainerName:   "name",
+		Image:           "image",
+		Environment:     []kobject.EnvVar{kobject.EnvVar{Name: "env", Value: "value"}},
+		Port:            []kobject.Ports{kobject.Ports{HostPort: 123, ContainerPort: 456}, kobject.Ports{HostPort: 123, ContainerPort: 456, Protocol: string(api.ProtocolUDP)}},
+		Command:         []string{"cmd"},
+		WorkingDir:      "dir",
+		Args:            []string{"arg1", "arg2"},
+		VolList:         []string{"/tmp/volume"},
+		Network:         []string{"network1", "network2"}, // supported
+		Labels:          nil,
+		Annotations:     map[string]string{"abc": "def"},
+		CPUQuota:        1, // not supported
+		CapAdd:          []string{"cap_add"},
+		CapDrop:         []string{"cap_drop"},
+		Expose:          []string{"expose"}, // not supported
+		Privileged:      true,
+		Restart:         "always",
+		ImagePullSecret: "regcred",
+		Stdin:           true,
+		Tty:             true,
+		TmpFs:           []string{"/tmp"},
+		Replicas:        2,
+		Volumes:         []kobject.Volumes{{SvcName: "app", MountPath: "/tmp/volume", PVCName: "app-claim0"}},
+		GroupAdd:        []int64{1003, 1005},
+		Configs:         []dockerCliTypes.ServiceConfigObjConfig{{Source: "config", Target: "/etc/world"}},
+		ConfigsMetaData: map[string]dockerCliTypes.ConfigObjConfig{"config": dockerCliTypes.ConfigObjConfig{Name: "myconfig", File: "kubernetes_test.go"}},
+	}
+}
+
+func newSimpleServiceConfig() kobject.ServiceConfig {
+	return kobject.ServiceConfig{
 		Name:          "app",
 		ContainerName: "name",
 		Image:         "image",
-		Environment:   []kobject.EnvVar{kobject.EnvVar{Name: "env", Value: "value"}},
-		Port:          []kobject.Ports{kobject.Ports{HostPort: 123, ContainerPort: 456}, kobject.Ports{HostPort: 123, ContainerPort: 456, Protocol: api.ProtocolUDP}},
-		Command:       []string{"cmd"},
-		WorkingDir:    "dir",
-		Args:          []string{"arg1", "arg2"},
-		VolList:       []string{"/tmp/volume"},
-		Network:       []string{"network1", "network2"}, // supported
-		Labels:        nil,
-		Annotations:   map[string]string{"abc": "def"},
-		CPUQuota:      1, // not supported
-		CapAdd:        []string{"cap_add"},
-		CapDrop:       []string{"cap_drop"},
-		Expose:        []string{"expose"}, // not supported
-		Privileged:    true,
-		Restart:       "always",
-		Stdin:         true,
-		Tty:           true,
-		TmpFs:         []string{"/tmp"},
-		Replicas:      2,
-		Volumes:       []kobject.Volumes{{SvcName: "app", MountPath: "/tmp/volume", PVCName: "app-claim0"}},
-		GroupAdd:      []int64{1003, 1005},
 	}
 }
 
@@ -110,7 +123,7 @@ func equalPorts(kobjectPorts []kobject.Ports, k8sPorts []api.ContainerPort) bool
 		for _, k8sPort := range k8sPorts {
 			// FIXME: HostPort should be copied to container port
 			//if port.HostPort == k8sPort.HostPort && port.Protocol == k8sPort.Protocol && port.ContainerPort == k8sPort.ContainerPort {
-			if port.Protocol == k8sPort.Protocol && port.ContainerPort == k8sPort.ContainerPort {
+			if port.Protocol == string(k8sPort.Protocol) && port.ContainerPort == k8sPort.ContainerPort {
 				found = true
 			}
 			// Name and HostIp shouldn't be set
@@ -163,7 +176,7 @@ func checkPodTemplate(config kobject.ServiceConfig, template api.PodTemplateSpec
 	if !equalStringSlice(config.Args, container.Args) {
 		return fmt.Errorf("Found different container args: %#v vs. %#v", config.Args, container.Args)
 	}
-	if len(template.Spec.Volumes) == 0 || len(template.Spec.Volumes[0].Name) == 0 || template.Spec.Volumes[0].VolumeSource.PersistentVolumeClaim == nil {
+	if len(template.Spec.Volumes) == 0 || len(template.Spec.Volumes[0].Name) == 0 || template.Spec.Volumes[0].VolumeSource.PersistentVolumeClaim == nil && template.Spec.Volumes[0].ConfigMap == nil {
 		return fmt.Errorf("Found incorrect volumes: %v vs. %#v", config.Volumes, template.Spec.Volumes)
 	}
 	// We only set controller labels here and k8s server will take care of other defaults, such as selectors
@@ -182,6 +195,9 @@ func checkPodTemplate(config kobject.ServiceConfig, template api.PodTemplateSpec
 	}
 	if config.Tty != template.Spec.Containers[0].TTY {
 		return fmt.Errorf("Found different values for TTY: %#v vs. %#v", config.Tty, template.Spec.Containers[0].TTY)
+	}
+	if config.ImagePullSecret != template.Spec.ImagePullSecrets[0].Name {
+		return fmt.Errorf("Found different values for ImagePullSecrets: %#v vs. %#v", config.ImagePullSecret, template.Spec.ImagePullSecrets[0].Name)
 	}
 	return nil
 }
@@ -281,13 +297,15 @@ func TestKomposeConvert(t *testing.T) {
 		expectedNumObjs int
 	}{
 		// objects generated are deployment, service nework policies (2) and pvc
-		"Convert to Deployments (D)":                  {newKomposeObject(), kobject.ConvertOptions{CreateD: true, Replicas: replicas, IsReplicaSetFlag: true}, 5},
-		"Convert to Deployments (D) with v3 replicas": {newKomposeObject(), kobject.ConvertOptions{CreateD: true}, 5},
-		"Convert to DaemonSets (DS)":                  {newKomposeObject(), kobject.ConvertOptions{CreateDS: true}, 5},
+		"Convert to Deployments (D)":                  {newKomposeObject(), kobject.ConvertOptions{CreateD: true, Replicas: replicas, IsReplicaSetFlag: true}, 6},
+		"Convert to Deployments (D) with v3 replicas": {newKomposeObject(), kobject.ConvertOptions{CreateD: true}, 6},
+		"Convert to DaemonSets (DS)":                  {newKomposeObject(), kobject.ConvertOptions{CreateDS: true}, 6},
 		// objects generated are deployment, daemonset, ReplicationController, service and pvc
-		"Convert to D, DS, and RC":                  {newKomposeObject(), kobject.ConvertOptions{CreateD: true, CreateDS: true, CreateRC: true, Replicas: replicas, IsReplicaSetFlag: true}, 6},
-		"Convert to D, DS, and RC with v3 replicas": {newKomposeObject(), kobject.ConvertOptions{CreateD: true, CreateDS: true, CreateRC: true}, 6},
-		// TODO: add more tests
+		"Convert to D, DS, and RC":                  {newKomposeObject(), kobject.ConvertOptions{CreateD: true, CreateDS: true, CreateRC: true, Replicas: replicas, IsReplicaSetFlag: true}, 7},
+		"Convert to D, DS, and RC with v3 replicas": {newKomposeObject(), kobject.ConvertOptions{CreateD: true, CreateDS: true, CreateRC: true}, 7},
+		// objects generated are statefulset
+		"Convert to SS with replicas ":   {newKomposeObject(), kobject.ConvertOptions{Controller: StatefulStateController, Replicas: replicas, IsReplicaSetFlag: true}, 5},
+		"Convert to SS without replicas": {newKomposeObject(), kobject.ConvertOptions{Controller: StatefulStateController}, 5},
 	}
 
 	for name, test := range testCases {
@@ -302,7 +320,7 @@ func TestKomposeConvert(t *testing.T) {
 			t.Errorf("Expected %d objects returned, got %d", test.expectedNumObjs, len(objs))
 		}
 
-		var foundSVC, foundD, foundDS, foundDC bool
+		var foundSVC, foundD, foundDS, foundDC, foundSS bool
 		name := "app"
 		labels := transformer.ConfigLabels(name)
 		config := test.komposeObject.ServiceConfigs[name]
@@ -318,6 +336,7 @@ func TestKomposeConvert(t *testing.T) {
 				}
 				foundSVC = true
 			}
+
 			if test.opt.CreateD {
 				if d, ok := obj.(*appsv1.Deployment); ok {
 					if err := checkPodTemplate(config, d.Spec.Template, labelsWithNetwork); err != nil {
@@ -410,6 +429,60 @@ func TestKomposeConvert(t *testing.T) {
 				}
 			}
 
+			if test.opt.Controller == StatefulStateController {
+				if ss, ok := obj.(*appsv1.StatefulSet); ok {
+					if err := checkPodTemplate(config, ss.Spec.Template, labelsWithNetwork); err != nil {
+						t.Errorf("%v", err)
+					}
+					if err := checkMeta(config, ss.ObjectMeta, name, true); err != nil {
+						t.Errorf("%v", err)
+					}
+					if test.opt.IsReplicaSetFlag {
+						if (int)(*ss.Spec.Replicas) != replicas {
+							t.Errorf("Expected %d replicas, got %d", replicas, ss.Spec.Replicas)
+						}
+					} else {
+						if (int)(*ss.Spec.Replicas) != newServiceConfig().Replicas {
+							t.Errorf("Expected %d replicas, got %d", newServiceConfig().Replicas, ss.Spec.Replicas)
+						}
+					}
+					foundSS = true
+				}
+
+				if u, ok := obj.(*unstructured.Unstructured); ok {
+					if u.GetKind() == "Statefulset" {
+						u.SetGroupVersionKind(schema.GroupVersionKind{
+							Group:   "apps",
+							Version: "v1",
+							Kind:    "Statefulset",
+						})
+						data, err := json.Marshal(u)
+						if err != nil {
+							t.Errorf("%v", err)
+						}
+						var d appsv1.Deployment
+						if err := json.Unmarshal(data, &d); err == nil {
+							if err := checkPodTemplate(config, d.Spec.Template, labelsWithNetwork); err != nil {
+								t.Errorf("%v", err)
+							}
+							if err := checkMeta(config, d.ObjectMeta, name, true); err != nil {
+								t.Errorf("%v", err)
+							}
+							if test.opt.IsReplicaSetFlag {
+								if (int)(*d.Spec.Replicas) != replicas {
+									t.Errorf("Expected %d replicas, got %d", replicas, d.Spec.Replicas)
+								}
+							} else {
+								if (int)(*d.Spec.Replicas) != newServiceConfig().Replicas {
+									t.Errorf("Expected %d replicas, got %d", newServiceConfig().Replicas, d.Spec.Replicas)
+								}
+							}
+							foundSS = true
+						}
+					}
+				}
+			}
+
 			// TODO: k8s & openshift transformer is now separated; either separate the test or combine the transformer
 			if test.opt.CreateDeploymentConfig {
 				if dc, ok := obj.(*deployapi.DeploymentConfig); ok {
@@ -439,6 +512,9 @@ func TestKomposeConvert(t *testing.T) {
 			t.Errorf("Expected create Daemon Set: %v, found Daemon Set: %v", test.opt.CreateDS, foundDS)
 		}
 
+		if test.opt.Controller == StatefulStateController && !foundSS {
+			t.Errorf("Expected create StatefulStateController")
+		}
 		if test.opt.CreateDeploymentConfig != foundDC {
 			t.Errorf("Expected create Deployment Config: %v, found Deployment Config: %v", test.opt.CreateDeploymentConfig, foundDC)
 		}
@@ -546,16 +622,106 @@ func TestConfigCapabilities(t *testing.T) {
 	}
 }
 
+func TestConfigAffinity(t *testing.T) {
+	testCases := map[string]struct {
+		service kobject.ServiceConfig
+		result  *api.Affinity
+	}{
+		"ConfigAffinity": {
+			service: kobject.ServiceConfig{
+				Placement: kobject.Placement{
+					PositiveConstraints: map[string]string{
+						"foo": "bar",
+					},
+					NegativeConstraints: map[string]string{
+						"baz": "qux",
+					},
+				},
+			},
+			result: &api.Affinity{
+				NodeAffinity: &api.NodeAffinity{
+					RequiredDuringSchedulingIgnoredDuringExecution: &api.NodeSelector{
+						NodeSelectorTerms: []api.NodeSelectorTerm{
+							{
+								MatchExpressions: []api.NodeSelectorRequirement{
+									{Key: "foo", Operator: api.NodeSelectorOpIn, Values: []string{"bar"}},
+									{Key: "baz", Operator: api.NodeSelectorOpNotIn, Values: []string{"qux"}},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		"ConfigAffinity (nil)": {
+			kobject.ServiceConfig{},
+			nil,
+		},
+	}
+
+	for name, test := range testCases {
+		t.Log("Test case:", name)
+		result := ConfigAffinity(test.service)
+		if !reflect.DeepEqual(result, test.result) {
+			t.Errorf("Not expected result for ConfigAffinity")
+		}
+	}
+}
+
+func TestConfigTopologySpreadConstraints(t *testing.T) {
+	serviceName := "app"
+	testCases := map[string]struct {
+		service kobject.ServiceConfig
+		result  []api.TopologySpreadConstraint
+	}{
+		"ConfigTopologySpreadConstraint": {
+			service: kobject.ServiceConfig{
+				Name: serviceName,
+				Placement: kobject.Placement{
+					Preferences: []string{
+						"zone", "ssd",
+					},
+				},
+			},
+			result: []api.TopologySpreadConstraint{
+				{
+					MaxSkew:           2,
+					TopologyKey:       "zone",
+					WhenUnsatisfiable: api.ScheduleAnyway,
+					LabelSelector: &metav1.LabelSelector{
+						MatchLabels: transformer.ConfigLabels(serviceName),
+					},
+				},
+				{
+					MaxSkew:           1,
+					TopologyKey:       "ssd",
+					WhenUnsatisfiable: api.ScheduleAnyway,
+					LabelSelector: &metav1.LabelSelector{
+						MatchLabels: transformer.ConfigLabels(serviceName),
+					},
+				},
+			},
+		},
+	}
+
+	for name, test := range testCases {
+		t.Log("Test case:", name)
+		result := ConfigTopologySpreadConstraints(test.service)
+		if !reflect.DeepEqual(result, test.result) {
+			t.Errorf("Not expected result for ConfigTopologySpreadConstraints")
+		}
+	}
+}
+
 func TestMultipleContainersInPod(t *testing.T) {
 	groupName := "pod_group"
-	containerName := ""
 
-	createConfig := func(name string, containerName *string) kobject.ServiceConfig {
-		config := newServiceConfig()
+	createConfig := func(name string, containerName string) kobject.ServiceConfig {
+		config := newSimpleServiceConfig()
 		config.Labels = map[string]string{compose.LabelServiceGroup: groupName}
 		config.Name = name
-		if containerName != nil {
-			config.ContainerName = *containerName
+		if containerName != "" {
+			config.ContainerName = containerName
 		}
 		config.Volumes = []kobject.Volumes{
 			{
@@ -572,28 +738,13 @@ func TestMultipleContainersInPod(t *testing.T) {
 		expectedNumObjs int
 		expectedNames   []string
 	}{
-		"Converted multiple containers": {
-			kobject.KomposeObject{
-				ServiceConfigs: map[string]kobject.ServiceConfig{
-					"app1": createConfig("app1", &containerName),
-					"app2": createConfig("app2", &containerName),
-				},
-			}, kobject.ConvertOptions{MultipleContainerMode: true}, 2, []string{"app1", "app2"}},
 		"Converted multiple containers to Deployments (D)": {
 			kobject.KomposeObject{
 				ServiceConfigs: map[string]kobject.ServiceConfig{
-					"app1": createConfig("app1", &containerName),
-					"app2": createConfig("app2", &containerName),
+					"app1": createConfig("app1", "app1"),
+					"app2": createConfig("app2", "app2"),
 				},
-			}, kobject.ConvertOptions{MultipleContainerMode: true, CreateD: true}, 3, []string{"app1", "app2"}},
-		"Converted multiple containers (ContainerName are nil) to Deployments (D)": {
-			kobject.KomposeObject{
-				ServiceConfigs: map[string]kobject.ServiceConfig{
-					"app1": createConfig("app1", nil),
-					"app2": createConfig("app2", nil),
-				},
-			}, kobject.ConvertOptions{MultipleContainerMode: true, CreateD: true}, 3, []string{"name", "name"}},
-		// TODO: add more tests
+			}, kobject.ConvertOptions{ServiceGroupMode: "label", CreateD: true}, 2, []string{"app1", "app2"}},
 	}
 
 	for name, test := range testCases {
@@ -647,7 +798,7 @@ func TestServiceAccountNameOnMultipleContainers(t *testing.T) {
 
 	createConfigs := func(labels map[string]string) map[string]kobject.ServiceConfig {
 		createConfig := func(name string) kobject.ServiceConfig {
-			config := newServiceConfig()
+			config := newSimpleServiceConfig()
 			config.Labels = map[string]string{compose.LabelServiceGroup: groupName}
 			for k, v := range labels {
 				config.Labels[k] = v
@@ -679,7 +830,7 @@ func TestServiceAccountNameOnMultipleContainers(t *testing.T) {
 		t.Log("Test case:", name)
 		k := Kubernetes{}
 		// Run Transform
-		objs, err := k.Transform(test.komposeObject, kobject.ConvertOptions{MultipleContainerMode: true, CreateD: true})
+		objs, err := k.Transform(test.komposeObject, kobject.ConvertOptions{ServiceGroupMode: "label", CreateD: true})
 		if err != nil {
 			t.Error(errors.Wrap(err, "k.Transform failed"))
 		}
@@ -695,5 +846,95 @@ func TestServiceAccountNameOnMultipleContainers(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+func TestHealthCheckOnMultipleContainers(t *testing.T) {
+	groupName := "pod_group"
+
+	createHealthCheck := func(TCPPort int32) kobject.HealthCheck {
+		return kobject.HealthCheck{
+			TCPPort: TCPPort,
+		}
+	}
+
+	createConfig := func(name string, livenessTCPPort, readinessTCPPort int32) kobject.ServiceConfig {
+		config := newSimpleServiceConfig()
+		config.Labels = map[string]string{compose.LabelServiceGroup: groupName}
+		config.Name = name
+		config.ContainerName = name
+		config.HealthChecks.Liveness = createHealthCheck(livenessTCPPort)
+		config.HealthChecks.Readiness = createHealthCheck(readinessTCPPort)
+		return config
+	}
+
+	testCases := map[string]struct {
+		komposeObject      kobject.KomposeObject
+		opt                kobject.ConvertOptions
+		expectedContainers map[string]api.Container
+	}{
+		"Converted multiple containers to Deployments": {
+			kobject.KomposeObject{
+				ServiceConfigs: map[string]kobject.ServiceConfig{
+					"app1": createConfig("app1", 8081, 9091),
+					"app2": createConfig("app2", 8082, 9092),
+				},
+			},
+			kobject.ConvertOptions{ServiceGroupMode: "label", CreateD: true},
+			map[string]api.Container{
+				"app1": {
+					LivenessProbe:  configProbe(createHealthCheck(8081)),
+					ReadinessProbe: configProbe(createHealthCheck(9091)),
+				},
+				"app2": {
+					LivenessProbe:  configProbe(createHealthCheck(8082)),
+					ReadinessProbe: configProbe(createHealthCheck(9092)),
+				},
+			},
+		},
+	}
+
+	for name, test := range testCases {
+		t.Log("Test case:", name)
+		k := Kubernetes{}
+		// Run Transform
+		objs, err := k.Transform(test.komposeObject, test.opt)
+		if err != nil {
+			t.Error(errors.Wrap(err, "k.Transform failed"))
+		}
+
+		// Check results
+		for _, obj := range objs {
+			if deployment, ok := obj.(*appsv1.Deployment); ok {
+				if len(deployment.Spec.Template.Spec.Containers) != len(test.expectedContainers) {
+					t.Errorf("Containers len is not equal, expected %d, got %d",
+						len(deployment.Spec.Template.Spec.Containers), len(test.expectedContainers))
+				}
+				for _, result := range deployment.Spec.Template.Spec.Containers {
+					expected, ok := test.expectedContainers[result.Name]
+					if !ok {
+						t.Errorf("Container %s doesn't expected", result.Name)
+					}
+					if !reflect.DeepEqual(result.LivenessProbe, expected.LivenessProbe) {
+						t.Errorf("Container %s: LivenessProbe expected %v returned, got %v", result.Name, expected.LivenessProbe, result.LivenessProbe)
+					}
+					if !reflect.DeepEqual(result.ReadinessProbe, expected.ReadinessProbe) {
+						t.Errorf("Container %s: ReadinessProbe expected %v returned, got %v", result.Name, expected.ReadinessProbe, result.ReadinessProbe)
+					}
+				}
+			}
+		}
+	}
+}
+
+func TestCreatePVC(t *testing.T) {
+	storageClassName := "custom-storage-class-name"
+	k := Kubernetes{}
+	result, err := k.CreatePVC("", "", PVCRequestSize, "", storageClassName)
+	if err != nil {
+		t.Error(errors.Wrap(err, "k.CreatePVC failed"))
+	}
+	if *result.Spec.StorageClassName != storageClassName {
+		t.Errorf("Expected %s returned, got %s", storageClassName, *result.Spec.StorageClassName)
 	}
 }

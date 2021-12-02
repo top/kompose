@@ -1,3 +1,10 @@
+---
+layout: default
+permalink: /user-guide/
+redirect_from: 
+  - /docs/user-guide.md/
+---
+
 # User Guide
 
 * TOC
@@ -94,7 +101,7 @@ INFO OpenShift file "foo-buildconfig.yaml" created
 
 ## Alternative Conversions
 
-The default `kompose` transformation will generate Kubernetes [Deployments](http://kubernetes.io/docs/user-guide/deployments/) and [Services](http://kubernetes.io/docs/user-guide/services/), in yaml format. You have alternative option to generate json with `-j`. Also, you can alternatively generate [Replication Controllers](http://kubernetes.io/docs/user-guide/replication-controller/) objects, [Daemon Sets](http://kubernetes.io/docs/admin/daemons/), or [Helm](https://github.com/helm/helm) charts.
+The default `kompose` transformation will generate Kubernetes [Deployments](http://kubernetes.io/docs/user-guide/deployments/) and [Services](http://kubernetes.io/docs/user-guide/services/), in yaml format. You have alternative option to generate json with `-j`. Also, you can alternatively generate [Replication Controllers](http://kubernetes.io/docs/user-guide/replication-controller/) objects, [Daemon Sets](http://kubernetes.io/docs/admin/daemons/), [Statefulset](https://kubernetes.io/docs/concepts/workloads/controllers/statefulset/) or [Helm](https://github.com/helm/helm) charts.
 
 ```sh
 $ kompose convert -j
@@ -124,6 +131,17 @@ INFO Kubernetes file "web-daemonset.yaml" created
 ```
 
 The `*-daemonset.yaml` files contain the Daemon Set objects
+
+```sh
+$ kompose convert --controller statefulset
+INFO Kubernetes file "db-service.yaml" created    
+INFO Kubernetes file "wordpress-service.yaml" created 
+INFO Kubernetes file "db-statefulset.yaml" created 
+INFO Kubernetes file "wordpress-statefulset.yaml" created 
+```
+
+The `*statefulset-.yaml` files contain the Statefulset objects.
+
 
 If you want to generate a Chart to be used with [Helm](https://github.com/kubernetes/helm) simply do:
 
@@ -163,16 +181,23 @@ The currently supported options are:
 | kompose.service.nodeport.port | port value (string) | 
 | kompose.service.expose.tls-secret | secret name |
 | kompose.volume.size | kubernetes supported volume size |
+| kompose.volume.storage-class-name | kubernetes supported volume storageClassName |
+| kompose.volume.type | use k8s volume type, eg "configMap", "persistentVolumeClaim", "emptyDir", "hostPath" |
 | kompose.controller.type | deployment / daemonset / replicationcontroller |
 | kompose.image-pull-policy | kubernetes pods imagePullPolicy |
 | kompose.image-pull-secret | kubernetes secret name for imagePullSecrets |
+| kompose.service.healthcheck.readiness.disable | kubernetes readiness disable |
 | kompose.service.healthcheck.readiness.test | kubernetes readiness exec command |
+| kompose.service.healthcheck.readiness.http_get_path | kubernetes readiness httpGet path |
+| kompose.service.healthcheck.readiness.http_get_port | kubernetes readiness httpGet port |
+| kompose.service.healthcheck.readiness.tcp_port | kubernetes readiness tcpSocket port |
 | kompose.service.healthcheck.readiness.interval | kubernetes readiness interval value |
 | kompose.service.healthcheck.readiness.timeout | kubernetes readiness timeout value |
 | kompose.service.healthcheck.readiness.retries | kubernetes readiness retries value |
 | kompose.service.healthcheck.readiness.start_period | kubernetes readiness start_period |
 | kompose.service.healthcheck.liveness.http_get_path | kubernetes liveness httpGet path |
 | kompose.service.healthcheck.liveness.http_get_port | kubernetes liveness httpGet port |
+| kompose.service.healthcheck.liveness.tcp_port | kubernetes liveness tcpSocket port |
 
 **Note**: `kompose.service.type` label should be defined with `ports` only (except for headless service), otherwise `kompose` will fail.
 
@@ -282,6 +307,21 @@ services:
     image: postgres:10.1
     labels:
       kompose.volume.size: 1Gi
+    volumes:
+      - db-data:/var/lib/postgresql/data
+```
+
+- `kompose.volume.storage-class-name` defines the requests storage's class name in the PersistentVolumeClaim.
+
+For example:
+
+```yaml
+version: '3'
+services:
+  db:
+    image: postgres:10.1
+    labels:
+      kompose.volume.storage-class-name: custom-storage-class-name
     volumes:
       - db-data:/var/lib/postgresql/data
 ```

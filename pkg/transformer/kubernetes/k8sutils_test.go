@@ -40,7 +40,7 @@ func TestCreateService(t *testing.T) {
 		ContainerName: "name",
 		Image:         "image",
 		Environment:   []kobject.EnvVar{kobject.EnvVar{Name: "env", Value: "value"}},
-		Port:          []kobject.Ports{kobject.Ports{HostPort: 123, ContainerPort: 456, Protocol: corev1.ProtocolTCP}},
+		Port:          []kobject.Ports{kobject.Ports{HostPort: 123, ContainerPort: 456, Protocol: string(corev1.ProtocolTCP)}},
 		Command:       []string{"cmd"},
 		WorkingDir:    "dir",
 		Args:          []string{"arg1", "arg2"},
@@ -61,13 +61,13 @@ func TestCreateService(t *testing.T) {
 		ServiceConfigs: map[string]kobject.ServiceConfig{"app": service},
 	}
 	k := Kubernetes{}
-	objects, err := k.Transform(komposeObject, kobject.ConvertOptions{CreateD: true, Replicas: 3})
+	_, err := k.Transform(komposeObject, kobject.ConvertOptions{CreateD: true, Replicas: 3})
 	if err != nil {
 		t.Error(errors.Wrap(err, "k.Transform failed"))
 	}
 
 	// Test the creation of the service
-	svc := k.CreateService("foo", service, objects)
+	svc := k.CreateService("foo", service)
 
 	if svc.Spec.Ports[0].Port != 123 {
 		t.Errorf("Expected port 123 upon conversion, actual %d", svc.Spec.Ports[0].Port)
@@ -83,7 +83,7 @@ func TestCreateServiceWithMemLimit(t *testing.T) {
 		ContainerName:  "name",
 		Image:          "image",
 		Environment:    []kobject.EnvVar{kobject.EnvVar{Name: "env", Value: "value"}},
-		Port:           []kobject.Ports{kobject.Ports{HostPort: 123, ContainerPort: 456, Protocol: corev1.ProtocolTCP}},
+		Port:           []kobject.Ports{kobject.Ports{HostPort: 123, ContainerPort: 456, Protocol: string(corev1.ProtocolTCP)}},
 		Command:        []string{"cmd"},
 		WorkingDir:     "dir",
 		Args:           []string{"arg1", "arg2"},
@@ -135,7 +135,7 @@ func TestCreateServiceWithCPULimit(t *testing.T) {
 		ContainerName:  "name",
 		Image:          "image",
 		Environment:    []kobject.EnvVar{kobject.EnvVar{Name: "env", Value: "value"}},
-		Port:           []kobject.Ports{kobject.Ports{HostPort: 123, ContainerPort: 456, Protocol: corev1.ProtocolTCP}},
+		Port:           []kobject.Ports{kobject.Ports{HostPort: 123, ContainerPort: 456, Protocol: string(corev1.ProtocolTCP)}},
 		Command:        []string{"cmd"},
 		WorkingDir:     "dir",
 		Args:           []string{"arg1", "arg2"},
@@ -188,7 +188,7 @@ func TestCreateServiceWithServiceUser(t *testing.T) {
 		ContainerName: "name",
 		Image:         "image",
 		Environment:   []kobject.EnvVar{kobject.EnvVar{Name: "env", Value: "value"}},
-		Port:          []kobject.Ports{kobject.Ports{HostPort: 123, ContainerPort: 456, Protocol: corev1.ProtocolTCP}},
+		Port:          []kobject.Ports{kobject.Ports{HostPort: 123, ContainerPort: 456, Protocol: string(corev1.ProtocolTCP)}},
 		Command:       []string{"cmd"},
 		WorkingDir:    "dir",
 		Args:          []string{"arg1", "arg2"},
@@ -231,7 +231,7 @@ func TestTransformWithPid(t *testing.T) {
 		ContainerName: "name",
 		Image:         "image",
 		Environment:   []kobject.EnvVar{kobject.EnvVar{Name: "env", Value: "value"}},
-		Port:          []kobject.Ports{kobject.Ports{HostPort: 123, ContainerPort: 456, Protocol: corev1.ProtocolTCP}},
+		Port:          []kobject.Ports{kobject.Ports{HostPort: 123, ContainerPort: 456, Protocol: string(corev1.ProtocolTCP)}},
 		Command:       []string{"cmd"},
 		WorkingDir:    "dir",
 		Args:          []string{"arg1", "arg2"},
@@ -267,7 +267,7 @@ func TestTransformWithInvalidPid(t *testing.T) {
 		ContainerName: "name",
 		Image:         "image",
 		Environment:   []kobject.EnvVar{kobject.EnvVar{Name: "env", Value: "value"}},
-		Port:          []kobject.Ports{kobject.Ports{HostPort: 123, ContainerPort: 456, Protocol: corev1.ProtocolTCP}},
+		Port:          []kobject.Ports{kobject.Ports{HostPort: 123, ContainerPort: 456, Protocol: string(corev1.ProtocolTCP)}},
 		Command:       []string{"cmd"},
 		WorkingDir:    "dir",
 		Args:          []string{"arg1", "arg2"},
@@ -352,41 +352,96 @@ func TestIsDir(t *testing.T) {
 	}
 }
 
-// TestServiceWithoutPort this tests if Headless Service is created for services without Port.
+// TestServiceWithHealthCheck this tests if Headless Service is created for services with HealthCheck.
 func TestServiceWithHealthCheck(t *testing.T) {
-	service := kobject.ServiceConfig{
-		ContainerName: "name",
-		Image:         "image",
-		ServiceType:   "Headless",
-		HealthChecks: kobject.HealthChecks{
-			Readiness: kobject.HealthCheck{
-				Test:        []string{"arg1", "arg2"},
-				Timeout:     10,
-				Interval:    5,
-				Retries:     3,
-				StartPeriod: 60,
+	testCases := map[string]struct {
+		service kobject.ServiceConfig
+	}{
+		"Exec": {
+			service: kobject.ServiceConfig{
+				ContainerName: "name",
+				Image:         "image",
+				ServiceType:   "Headless",
+				HealthChecks: kobject.HealthChecks{
+					Readiness: kobject.HealthCheck{
+						Test:        []string{"arg1", "arg2"},
+						Timeout:     10,
+						Interval:    5,
+						Retries:     3,
+						StartPeriod: 60,
+					},
+					Liveness: kobject.HealthCheck{
+						Test:        []string{"arg1", "arg2"},
+						Timeout:     11,
+						Interval:    6,
+						Retries:     4,
+						StartPeriod: 61,
+					},
+				},
 			},
-			Liveness: kobject.HealthCheck{
-				Test:        []string{"arg1", "arg2"},
-				Timeout:     11,
-				Interval:    6,
-				Retries:     4,
-				StartPeriod: 61,
+		},
+		"HTTPGet": {
+			service: kobject.ServiceConfig{
+				ContainerName: "name",
+				Image:         "image",
+				ServiceType:   "Headless",
+				HealthChecks: kobject.HealthChecks{
+					Readiness: kobject.HealthCheck{
+						HTTPPath:    "/health",
+						HTTPPort:    8080,
+						Timeout:     10,
+						Interval:    5,
+						Retries:     3,
+						StartPeriod: 60,
+					},
+					Liveness: kobject.HealthCheck{
+						HTTPPath:    "/ready",
+						HTTPPort:    8080,
+						Timeout:     11,
+						Interval:    6,
+						Retries:     4,
+						StartPeriod: 61,
+					},
+				},
+			},
+		},
+		"TCPSocket": {
+			service: kobject.ServiceConfig{
+				ContainerName: "name",
+				Image:         "image",
+				ServiceType:   "Headless",
+				HealthChecks: kobject.HealthChecks{
+					Readiness: kobject.HealthCheck{
+						TCPPort:     8080,
+						Timeout:     10,
+						Interval:    5,
+						Retries:     3,
+						StartPeriod: 60,
+					},
+					Liveness: kobject.HealthCheck{
+						TCPPort:     8080,
+						Timeout:     11,
+						Interval:    6,
+						Retries:     4,
+						StartPeriod: 61,
+					},
+				},
 			},
 		},
 	}
 
-	komposeObject := kobject.KomposeObject{
-		ServiceConfigs: map[string]kobject.ServiceConfig{"app": service},
-	}
-	k := Kubernetes{}
-
-	objects, err := k.Transform(komposeObject, kobject.ConvertOptions{CreateD: true, Replicas: 1})
-	if err != nil {
-		t.Error(errors.Wrap(err, "k.Transform failed"))
-	}
-	if err := testutils.CheckForHealthCheckLivenessAndReadiness(objects); err != nil {
-		t.Error(err)
+	for _, testCase := range testCases {
+		k := Kubernetes{}
+		komposeObject := kobject.KomposeObject{
+			ServiceConfigs: map[string]kobject.ServiceConfig{"app": testCase.service},
+		}
+		objects, err := k.Transform(komposeObject, kobject.ConvertOptions{CreateD: true, Replicas: 1})
+		if err != nil {
+			t.Error(errors.Wrap(err, "k.Transform failed"))
+		}
+		if err := testutils.CheckForHealthCheckLivenessAndReadiness(objects); err != nil {
+			t.Error(err)
+		}
 	}
 }
 

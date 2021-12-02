@@ -274,12 +274,6 @@ convert::expect_failure "kompose up $KOMPOSE_ROOT/script/test/fixtures/gitlab/do
 convert::expect_failure "kompose down $KOMPOSE_ROOT/script/test/fixtures/gitlab/docker-compose.yml -j" "Unknown Argument docker-gitlab.yml"
 convert::expect_failure "kompose convert $KOMPOSE_ROOT/script/test/fixtures/gitlab/docker-compose.yml -j" "Unknown Argument docker-gitlab.yml"
 
-# Tests related to kompose --bundle convert usage and that setting the compose file results in a failure
-# We no longer test --bundle, however, this command may come back in the future thus we are keeping the test commented
-# convert::expect_failure "kompose -f $KOMPOSE_ROOT/script/test/fixtures/bundles/foo.yml --bundle $KOMPOSE_ROOT/script/test/fixtures/bundles/dab/docker-compose-bundle.dab convert"
-# convert::expect_success "kompose --bundle $KOMPOSE_ROOT/script/test/fixtures/bundles/dab/docker-compose-bundle.dab convert --stdout -j" "$KOMPOSE_ROOT/script/test/fixtures/bundles/dab/output-k8s.json"
-# convert::expect_success_and_warning "kompose --bundle $KOMPOSE_ROOT/script/test/fixtures/bundles/dsb/docker-voting-bundle.dsb convert --stdout -j" "$KOMPOSE_ROOT/script/test/fixtures/bundles/dsb/output-k8s.json"  "Unsupported Networks key - ignoring"
-
 # Test related to multiple-compose files
 # Kubernetes test
 cmd="kompose -f $KOMPOSE_ROOT/script/test/fixtures/multiple-compose-files/docker-k8s.yml -f $KOMPOSE_ROOT/script/test/fixtures/multiple-compose-files/docker-os.yml convert --stdout -j"
@@ -527,7 +521,7 @@ sed -e "s;%VERSION%;$version;g" -e "s;%CMD%;$cmd;g"  $KOMPOSE_ROOT/script/test/f
 convert::expect_success "$cmd" "/tmp/output-k8s.json"
 
 cmd="kompose --provider openshift -f $KOMPOSE_ROOT/script/test/fixtures/service-label/docker-compose.yaml convert --stdout -j"
-sed -e "s;%VERSION%;$version;g" -e "s;%CMD%;$cmd;g"  $KOMPOSE_ROOT/script/test/fixtures/service-label/output-oc.json > /tmp/output-oc.json
+sed -e "s;%VERSION%;$version;g" -e "s;%CMD%;$cmd;g"  $KOMPOSE_ROOT/script/test/fixtures/service-label/output-os.json > /tmp/output-os.json
 convert::expect_success "$cmd" "/tmp/output-oc.json"
 
 ######
@@ -585,11 +579,6 @@ cmd="kompose convert --provider=openshift -f $KOMPOSE_ROOT/script/test/fixtures/
 sed -e "s;%VERSION%;$version;g" -e "s;%CMD%;$cmd;g"  $KOMPOSE_ROOT/script/test/fixtures/change-in-volume/output-os-template.json > /tmp/output-os.json
 convert::expect_success_and_warning "$cmd" "/tmp/output-os.json" "Volume mount on the host "\"."\" isn't supported - ignoring path on the host"
 
-# Test that empty-vols works
-cmd="kompose convert -f $KOMPOSE_ROOT/script/test/fixtures/change-in-volume/docker-compose.yml --stdout -j --volumes emptyDir"
-sed -e "s;%VERSION%;$version;g" -e "s;%CMD%;$cmd;g"  $KOMPOSE_ROOT/script/test/fixtures/change-in-volume/output-k8s-empty-vols-template.json > /tmp/output-k8s.json
-convert::expect_success_and_warning "$cmd" "/tmp/output-k8s.json" "Volume mount on the host "\"."\" isn't supported - ignoring path on the host"
-
 #Failing test for `--volumes` option
 convert::expect_failure "kompose convert --stdout -j -f $KOMPOSE_ROOT/script/test/fixtures/change-in-volume/docker-compose.yml --volumes foobar"
 
@@ -645,7 +634,7 @@ sed -e "s;%VERSION%;$version;g" -e "s;%CMD%;$cmd;g" "$KOMPOSE_ROOT/script/test/f
 convert::expect_success "$cmd" "/tmp/output-k8s.json"
 
 cmd="kompose convert --stdout --provider=openshift -j --volumes=configMap -f $KOMPOSE_ROOT/script/test/fixtures/configmap-volume/docker-compose.yml"
-sed -e "s;%VERSION%;$version;g" -e "s;%CMD%;$cmd;g" "$KOMPOSE_ROOT/script/test/fixtures/configmap-volume/output-oc.json" >  /tmp/output-oc.json
+sed -e "s;%VERSION%;$version;g" -e "s;%CMD%;$cmd;g" "$KOMPOSE_ROOT/script/test/fixtures/configmap-volume/output-oc.json" >  /tmp/output-os.json
 convert::expect_success "$cmd" "/tmp/output-oc.json"
 
 

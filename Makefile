@@ -18,6 +18,20 @@ GITCOMMIT := $(shell git rev-parse --short HEAD)
 BUILD_FLAGS := -ldflags="-w -s -X github.com/kubernetes/kompose/pkg/version.GITCOMMIT=$(GITCOMMIT)"
 TEST_IMAGE := kompose/tests:latest
 
+# go-get-tool will 'go get' any package $2 and install it to $1.
+PROJECT_DIR := $(shell dirname $(abspath $(lastword $(MAKEFILE_LIST))))
+define go-get-tool
+@[ -f $(1) ] || { \
+set -e ;\
+TMP_DIR=$$(mktemp -d) ;\
+cd $$TMP_DIR ;\
+go mod init tmp ;\
+echo "Downloading $(2)" ;\
+GOBIN=$(PROJECT_DIR)/bin go get $(2) ;\
+rm -rf $$TMP_DIR ;\
+}
+endef
+
 default: bin
 
 .PHONY: all
@@ -37,8 +51,9 @@ cross:
 	GOOS=linux GOARCH=amd64 CGO_ENABLED=0 GO111MODULE=on go build  ${BUILD_FLAGS} -installsuffix cgo  -o "bin/kompose-linux-amd64" main.go
 	GOOS=linux GOARCH=arm CGO_ENABLED=0 GO111MODULE=on go build  ${BUILD_FLAGS} -installsuffix cgo  -o "bin/kompose-linux-arm" main.go
 	GOOS=linux GOARCH=arm64 CGO_ENABLED=0 GO111MODULE=on go build  ${BUILD_FLAGS} -installsuffix cgo  -o "bin/kompose-linux-arm64" main.go
-	GOOS=windows GOARCH=amd64 CGO_ENABLED=0 GO111MODULE=on go build  ${BUILD_FLAGS} -installsuffix cgo  -o "bin/kompose-windows-amd64" main.go
+	GOOS=windows GOARCH=amd64 CGO_ENABLED=0 GO111MODULE=on go build  ${BUILD_FLAGS} -installsuffix cgo  -o "bin/kompose-windows-amd64.exe" main.go
 	GOOS=darwin GOARCH=amd64 CGO_ENABLED=0 GO111MODULE=on go build  ${BUILD_FLAGS} -installsuffix cgo  -o "bin/kompose-darwin-amd64" main.go
+	GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 GO111MODULE=on go build  ${BUILD_FLAGS} -installsuffix cgo  -o "bin/kompose-darwin-arm64" main.go
 
 .PHONY: clean
 clean:
@@ -97,10 +112,10 @@ test: bin test-dep  validate test-unit-cover install test-cmd
 # Install all the required test-dependencies before executing tests (only valid when running `make test`)
 .PHONY: test-dep
 test-dep:
-	go get github.com/mattn/goveralls
-	go get github.com/modocache/gover
-	go get golang.org/x/lint/golint
-	go get github.com/mitchellh/gox
+	go install github.com/mattn/goveralls@latest
+	go install github.com/modocache/gover@latest
+	go install golang.org/x/lint/golint@latest
+	go install github.com/mitchellh/gox@latest
 
 
 # build docker image that is used for running all test locally
@@ -117,3 +132,14 @@ test-container:
 .PHONY: test-k8s
 test-k8s:
 	./script/test_k8s/test.sh
+
+GOLANGCI_LINT = $(shell pwd)/bin/golangci-lint
+.PHONY: install-golangci-lint
+install-golangci-lint:
+# golangci-lint version must consistent with github CI
+# ref: ./.github/workflows/golangci-lint.yml
+	$(call go-get-tool,$(GOLANGCI_LINT),github.com/golangci/golangci-lint/cmd/golangci-lint@v1.32.2)
+
+.PHONY: golangci-lint
+golangci-lint: install-golangci-lint
+	$(GOLANGCI_LINT) run -c .golangci.yml --timeout 5m

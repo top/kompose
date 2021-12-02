@@ -17,6 +17,7 @@ limitations under the License.
 package kubernetes
 
 import (
+	"encoding/base64"
 	"fmt"
 	"io/ioutil"
 	"os"
@@ -37,10 +38,10 @@ import (
 	"github.com/pkg/errors"
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/cast"
+	"golang.org/x/tools/godoc/util"
 	appsv1 "k8s.io/api/apps/v1"
 	api "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
-	networkingv1beta1 "k8s.io/api/networking/v1beta1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -53,20 +54,18 @@ type Kubernetes struct {
 	Opt kobject.ConvertOptions
 }
 
-// TIMEOUT is how long we'll wait for the termination of kubernetes resource to be successful
-// used when undeploying resources from kubernetes
-const TIMEOUT = 300
-
 // PVCRequestSize (Persistent Volume Claim) has default size
 const PVCRequestSize = "100Mi"
+
+var ValidVolumeSet = map[string]struct{}{"emptyDir": {}, "hostPath": {}, "configMap": {}, "persistentVolumeClaim": {}}
 
 const (
 	// DeploymentController is controller type for Deployment
 	DeploymentController = "deployment"
 	// DaemonSetController is controller type for DaemonSet
 	DaemonSetController = "daemonset"
-	// ReplicationController is controller type for  ReplicationController
-	ReplicationController = "replicationcontroller"
+	// StatefulStateController is controller type for StatefulSet
+	StatefulStateController = "statefulset"
 )
 
 // CheckUnsupportedKey checks if given komposeObject contains
@@ -110,7 +109,6 @@ func (k *Kubernetes) InitPodSpec(name string, image string, pullSecret string) a
 	if image == "" {
 		image = name
 	}
-
 	pod := api.PodSpec{
 		Containers: []api.Container{
 			{
@@ -185,10 +183,20 @@ func (k *Kubernetes) InitPodSpecWithConfigMap(name string, image string, service
 		},
 		Volumes: volumes,
 	}
+
+	if service.ImagePullSecret != "" {
+		pod.ImagePullSecrets = []api.LocalObjectReference{
+			{
+				Name: service.ImagePullSecret,
+			},
+		}
+	}
 	return pod
 }
 
 // InitSvc initializes Kubernetes Service object
+// The created service name will = ServiceConfig.Name, but the selector may be not.
+// If this service is grouped, the selector may be another name = name
 func (k *Kubernetes) InitSvc(name string, service kobject.ServiceConfig) *api.Service {
 	svc := &api.Service{
 		TypeMeta: metav1.TypeMeta{
@@ -196,19 +204,19 @@ func (k *Kubernetes) InitSvc(name string, service kobject.ServiceConfig) *api.Se
 			APIVersion: "v1",
 		},
 		ObjectMeta: metav1.ObjectMeta{
-			Name:   name,
+			Name:   service.Name,
 			Labels: transformer.ConfigLabels(name),
 		},
 		// The selector uses the service.Name, which must be consistent with workloads label
 		Spec: api.ServiceSpec{
-			Selector: transformer.ConfigLabels(service.Name),
+			Selector: transformer.ConfigLabels(name),
 		},
 	}
 	return svc
 }
 
 // InitConfigMapForEnv initializes a ConfigMap object
-func (k *Kubernetes) InitConfigMapForEnv(name string, service kobject.ServiceConfig, opt kobject.ConvertOptions, envFile string) *api.ConfigMap {
+func (k *Kubernetes) InitConfigMapForEnv(name string, opt kobject.ConvertOptions, envFile string) *api.ConfigMap {
 	envs, err := GetEnvsFromFile(envFile, opt)
 	if err != nil {
 		log.Fatalf("Unable to retrieve env file: %s", err)
@@ -272,7 +280,7 @@ func (k *Kubernetes) IntiConfigMapFromFileOrDir(name, cmName, filePath string, s
 				dataMap[file.Name()] = data
 			}
 		}
-		configMap.Data = dataMap
+		initConfigMapData(configMap, dataMap)
 
 	case mode.IsRegular():
 		// do file stuff
@@ -298,15 +306,29 @@ func useSubPathMount(cm *api.ConfigMap) bool {
 	return true
 }
 
+func initConfigMapData(configMap *api.ConfigMap, data map[string]string) {
+	stringData := map[string]string{}
+	binData := map[string][]byte{}
+
+	for k, v := range data {
+		isText := util.IsText([]byte(v))
+		if isText {
+			stringData[k] = v
+		} else {
+			binData[k] = []byte(base64.StdEncoding.EncodeToString([]byte(v)))
+		}
+	}
+
+	configMap.Data = stringData
+	configMap.BinaryData = binData
+}
+
 //InitConfigMapFromFile initializes a ConfigMap object
 func (k *Kubernetes) InitConfigMapFromFile(name string, service kobject.ServiceConfig, fileName string) *api.ConfigMap {
 	content, err := GetContentFromFile(fileName)
 	if err != nil {
 		log.Fatalf("Unable to retrieve file: %s", err)
 	}
-
-	dataMap := make(map[string]string)
-	dataMap[filepath.Base(fileName)] = content
 
 	configMapName := ""
 	for key, tmpConfig := range service.ConfigsMetaData {
@@ -323,8 +345,10 @@ func (k *Kubernetes) InitConfigMapFromFile(name string, service kobject.ServiceC
 			Name:   FormatFileName(configMapName),
 			Labels: transformer.ConfigLabels(name),
 		},
-		Data: dataMap,
 	}
+
+	data := map[string]string{filepath.Base(fileName): content}
+	initConfigMapData(configMap, data)
 	return configMap
 }
 
@@ -404,36 +428,74 @@ func (k *Kubernetes) InitDS(name string, service kobject.ServiceConfig) *appsv1.
 	return ds
 }
 
-func (k *Kubernetes) initIngress(name string, service kobject.ServiceConfig, port int32) *networkingv1beta1.Ingress {
+func (k *Kubernetes) InitSS(name string, service kobject.ServiceConfig, replicas int) *appsv1.StatefulSet {
+	var podSpec api.PodSpec
+	if len(service.Configs) > 0 {
+		podSpec = k.InitPodSpecWithConfigMap(name, service.Image, service)
+	} else {
+		podSpec = k.InitPodSpec(name, service.Image, service.ImagePullSecret)
+	}
+	rp := int32(replicas)
+	ds := &appsv1.StatefulSet{
+		TypeMeta: metav1.TypeMeta{
+			Kind:       "StatefulSet",
+			APIVersion: "apps/v1",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:   name,
+			Labels: transformer.ConfigAllLabels(name, &service),
+		},
+		Spec: appsv1.StatefulSetSpec{
+			Replicas: &rp,
+			Template: api.PodTemplateSpec{
+				Spec: podSpec,
+			},
+			Selector: &metav1.LabelSelector{
+				MatchLabels: transformer.ConfigLabels(name),
+			},
+			ServiceName: service.Name,
+		},
+	}
+	return ds
+}
+
+func (k *Kubernetes) initIngress(name string, service kobject.ServiceConfig, port int32) *networkingv1.Ingress {
 	hosts := regexp.MustCompile("[ ,]*,[ ,]*").Split(service.ExposeService, -1)
 
-	ingress := &networkingv1beta1.Ingress{
+	ingress := &networkingv1.Ingress{
 		TypeMeta: metav1.TypeMeta{
 			Kind:       "Ingress",
-			APIVersion: "extensions/v1beta1",
+			APIVersion: "networking.k8s.io/v1",
 		},
 		ObjectMeta: metav1.ObjectMeta{
 			Name:        name,
 			Labels:      transformer.ConfigLabels(name),
 			Annotations: transformer.ConfigAnnotations(service),
 		},
-		Spec: networkingv1beta1.IngressSpec{
-			Rules: make([]networkingv1beta1.IngressRule, len(hosts)),
+		Spec: networkingv1.IngressSpec{
+			Rules: make([]networkingv1.IngressRule, len(hosts)),
 		},
 	}
 	tlsHosts := make([]string, len(hosts))
+	pathType := networkingv1.PathTypePrefix
 	for i, host := range hosts {
 		host, p := transformer.ParseIngressPath(host)
-		ingress.Spec.Rules[i] = networkingv1beta1.IngressRule{
-			IngressRuleValue: networkingv1beta1.IngressRuleValue{
-				HTTP: &networkingv1beta1.HTTPIngressRuleValue{
-					Paths: []networkingv1beta1.HTTPIngressPath{
+		if p == "" {
+			p = "/"
+		}
+		ingress.Spec.Rules[i] = networkingv1.IngressRule{
+			IngressRuleValue: networkingv1.IngressRuleValue{
+				HTTP: &networkingv1.HTTPIngressRuleValue{
+					Paths: []networkingv1.HTTPIngressPath{
 						{
-							Path: p,
-							Backend: networkingv1beta1.IngressBackend{
-								ServiceName: name,
-								ServicePort: intstr.IntOrString{
-									IntVal: port,
+							Path:     p,
+							PathType: &pathType,
+							Backend: networkingv1.IngressBackend{
+								Service: &networkingv1.IngressServiceBackend{
+									Name: name,
+									Port: networkingv1.ServiceBackendPort{
+										Number: port,
+									},
 								},
 							},
 						},
@@ -448,14 +510,14 @@ func (k *Kubernetes) initIngress(name string, service kobject.ServiceConfig, por
 	}
 	if service.ExposeServiceTLS != "" {
 		if service.ExposeServiceTLS != "true" {
-			ingress.Spec.TLS = []networkingv1beta1.IngressTLS{
+			ingress.Spec.TLS = []networkingv1.IngressTLS{
 				{
 					Hosts:      tlsHosts,
 					SecretName: service.ExposeServiceTLS,
 				},
 			}
 		} else {
-			ingress.Spec.TLS = []networkingv1beta1.IngressTLS{
+			ingress.Spec.TLS = []networkingv1.IngressTLS{
 				{
 					Hosts: tlsHosts,
 				},
@@ -498,7 +560,7 @@ func (k *Kubernetes) CreateSecrets(komposeObject kobject.KomposeObject) ([]*api.
 }
 
 // CreatePVC initializes PersistentVolumeClaim
-func (k *Kubernetes) CreatePVC(name string, mode string, size string, selectorValue string) (*api.PersistentVolumeClaim, error) {
+func (k *Kubernetes) CreatePVC(name string, mode string, size string, selectorValue string, storageClassName string) (*api.PersistentVolumeClaim, error) {
 	volSize, err := resource.ParseQuantity(size)
 	if err != nil {
 		return nil, errors.Wrap(err, "resource.ParseQuantity failed, Error parsing size")
@@ -533,38 +595,38 @@ func (k *Kubernetes) CreatePVC(name string, mode string, size string, selectorVa
 	} else {
 		pvc.Spec.AccessModes = []api.PersistentVolumeAccessMode{api.ReadWriteOnce}
 	}
+
+	if len(storageClassName) > 0 {
+		pvc.Spec.StorageClassName = &storageClassName
+	}
+
 	return pvc, nil
 }
 
 // ConfigPorts configures the container ports.
-func ConfigPorts(name string, service kobject.ServiceConfig) []api.ContainerPort {
-	ports := []api.ContainerPort{}
+func ConfigPorts(service kobject.ServiceConfig) []api.ContainerPort {
+	var ports []api.ContainerPort
 	exist := map[string]bool{}
 	for _, port := range service.Port {
-		// temp use as an id
-		if exist[string(port.ContainerPort)+string(port.Protocol)] {
+		if exist[port.ID()] {
 			continue
 		}
-		// If the default is already TCP, no need to include it.
-		if port.Protocol == api.ProtocolTCP {
-			ports = append(ports, api.ContainerPort{
-				ContainerPort: port.ContainerPort,
-				HostIP:        port.HostIP,
-			})
-		} else {
-			ports = append(ports, api.ContainerPort{
-				ContainerPort: port.ContainerPort,
-				Protocol:      port.Protocol,
-				HostIP:        port.HostIP,
-			})
+		containerPort := api.ContainerPort{
+			ContainerPort: port.ContainerPort,
+			HostIP:        port.HostIP,
 		}
-		exist[string(port.ContainerPort)+string(port.Protocol)] = true
+		// If the default is already TCP, no need to include protocol.
+		if protocol := api.Protocol(port.Protocol); protocol != api.ProtocolTCP {
+			containerPort.Protocol = protocol
+		}
+		ports = append(ports, containerPort)
+		exist[port.ID()] = true
 	}
 
 	return ports
 }
 
-func (k *Kubernetes) ConfigLBServicePorts(name string, service kobject.ServiceConfig) ([]api.ServicePort, []api.ServicePort) {
+func (k *Kubernetes) ConfigLBServicePorts(service kobject.ServiceConfig) ([]api.ServicePort, []api.ServicePort) {
 	var tcpPorts []api.ServicePort
 	var udpPorts []api.ServicePort
 	for _, port := range service.Port {
@@ -581,14 +643,11 @@ func (k *Kubernetes) ConfigLBServicePorts(name string, service kobject.ServiceCo
 			TargetPort: targetPort,
 		}
 
-		// If the default is already TCP, no need to include it.
-		if port.Protocol != api.ProtocolTCP {
-			servicePort.Protocol = port.Protocol
-		}
-
-		if port.Protocol == api.ProtocolTCP {
+		if protocol := api.Protocol(port.Protocol); protocol == api.ProtocolTCP {
+			// If the default is already TCP, no need to include protocol.
 			tcpPorts = append(tcpPorts, servicePort)
 		} else {
+			servicePort.Protocol = protocol
 			udpPorts = append(udpPorts, servicePort)
 		}
 	}
@@ -596,7 +655,7 @@ func (k *Kubernetes) ConfigLBServicePorts(name string, service kobject.ServiceCo
 }
 
 // ConfigServicePorts configure the container service ports.
-func (k *Kubernetes) ConfigServicePorts(name string, service kobject.ServiceConfig) []api.ServicePort {
+func (k *Kubernetes) ConfigServicePorts(service kobject.ServiceConfig) []api.ServicePort {
 	servicePorts := []api.ServicePort{}
 	seenPorts := make(map[int]struct{}, len(service.Port))
 
@@ -617,7 +676,7 @@ func (k *Kubernetes) ConfigServicePorts(name string, service kobject.ServiceConf
 			if service.ServiceType == string(api.ServiceTypeLoadBalancer) {
 				log.Fatalf("Service %s of type LoadBalancer cannot use TCP and UDP for the same port", name)
 			}
-			name = fmt.Sprintf("%s-%s", name, strings.ToLower(string(port.Protocol)))
+			name = fmt.Sprintf("%s-%s", name, strings.ToLower(port.Protocol))
 		}
 
 		servicePort = api.ServicePort{
@@ -630,9 +689,9 @@ func (k *Kubernetes) ConfigServicePorts(name string, service kobject.ServiceConf
 			servicePort.NodePort = service.NodePortPort
 		}
 
-		// If the default is already TCP, no need to include it.
-		if port.Protocol != api.ProtocolTCP {
-			servicePort.Protocol = port.Protocol
+		// If the default is already TCP, no need to include protocol.
+		if protocol := api.Protocol(port.Protocol); protocol != api.ProtocolTCP {
+			servicePort.Protocol = protocol
 		}
 
 		servicePorts = append(servicePorts, servicePort)
@@ -780,9 +839,18 @@ func (k *Kubernetes) ConfigVolumes(name string, service kobject.ServiceConfig) (
 	useEmptyVolumes := k.Opt.EmptyVols
 	useHostPath := k.Opt.Volumes == "hostPath"
 	useConfigMap := k.Opt.Volumes == "configMap"
-
 	if k.Opt.Volumes == "emptyDir" {
 		useEmptyVolumes = true
+	}
+
+	// Override volume type if specified in service labels.
+	if vt, ok := service.Labels["kompose.volume.type"]; ok {
+		if _, okk := ValidVolumeSet[vt]; !okk {
+			return nil, nil, nil, nil, fmt.Errorf("invalid volume type %s specified in label 'kompose.volume.type' in service %s", vt, service.Name)
+		}
+		useEmptyVolumes = vt == "emptyDir"
+		useHostPath = vt == "hostPath"
+		useConfigMap = vt == "configMap"
 	}
 
 	// config volumes from secret if present
@@ -795,7 +863,6 @@ func (k *Kubernetes) ConfigVolumes(name string, service kobject.ServiceConfig) (
 	for _, volume := range service.Volumes {
 		// check if ro/rw mode is defined, default rw
 		readonly := len(volume.Mode) > 0 && volume.Mode == "ro"
-
 		if volume.VolumeName == "" {
 			if useEmptyVolumes {
 				volumeName = strings.Replace(volume.PVCName, "claim", "empty", 1)
@@ -806,6 +873,9 @@ func (k *Kubernetes) ConfigVolumes(name string, service kobject.ServiceConfig) (
 			} else {
 				volumeName = volume.PVCName
 			}
+			// to support service group bases on volume, we need use the new group name to replace the origin service name
+			// in volume name. For normal service, this should have no effect
+			volumeName = strings.Replace(volumeName, service.Name, name, 1)
 			count++
 		} else {
 			volumeName = volume.VolumeName
@@ -844,6 +914,7 @@ func (k *Kubernetes) ConfigVolumes(name string, service kobject.ServiceConfig) (
 		} else {
 			volsource = k.ConfigPVCVolumeSource(volumeName, readonly)
 			if volume.VFrom == "" {
+				var storageClassName string
 				defaultSize := PVCRequestSize
 				if k.Opt.PVCRequestSize != "" {
 					defaultSize = k.Opt.PVCRequestSize
@@ -854,11 +925,13 @@ func (k *Kubernetes) ConfigVolumes(name string, service kobject.ServiceConfig) (
 					for key, value := range service.Labels {
 						if key == "kompose.volume.size" {
 							defaultSize = value
+						} else if key == "kompose.volume.storage-class-name" {
+							storageClassName = value
 						}
 					}
 				}
 
-				createdPVC, err := k.CreatePVC(volumeName, volume.Mode, defaultSize, volume.SelectorValue)
+				createdPVC, err := k.CreatePVC(volumeName, volume.Mode, defaultSize, volume.SelectorValue, storageClassName)
 
 				if err != nil {
 					return nil, nil, nil, nil, errors.Wrap(err, "k.CreatePVC failed")
@@ -909,6 +982,9 @@ func (k *Kubernetes) ConfigConfigMapVolumeSource(cmName string, targetPath strin
 		for k := range cm.Data {
 			keys = append(keys, k)
 		}
+		for k := range cm.BinaryData {
+			keys = append(keys, k)
+		}
 		key := keys[0]
 		_, p := path.Split(targetPath)
 		s.Items = []api.KeyToPath{
@@ -950,7 +1026,7 @@ func (k *Kubernetes) ConfigPVCVolumeSource(name string, readonly bool) *api.Volu
 }
 
 // ConfigEnvs configures the environment variables.
-func ConfigEnvs(name string, service kobject.ServiceConfig, opt kobject.ConvertOptions) ([]api.EnvVar, error) {
+func ConfigEnvs(service kobject.ServiceConfig, opt kobject.ConvertOptions) ([]api.EnvVar, error) {
 	envs := transformer.EnvSort{}
 
 	keysFromEnvFile := make(map[string]bool)
@@ -1004,8 +1080,75 @@ func ConfigEnvs(name string, service kobject.ServiceConfig, opt kobject.ConvertO
 	return envs, nil
 }
 
-// CreateKubernetesObjects generates a Kubernetes artifact for each input type service
-func (k *Kubernetes) CreateKubernetesObjects(name string, service kobject.ServiceConfig, opt kobject.ConvertOptions) []runtime.Object {
+// ConfigAffinity configures the Affinity.
+func ConfigAffinity(service kobject.ServiceConfig) *api.Affinity {
+	var affinity *api.Affinity
+	// Config constraints
+	// Convert constraints to requiredDuringSchedulingIgnoredDuringExecution
+	positiveConstraints := configConstrains(service.Placement.PositiveConstraints, api.NodeSelectorOpIn)
+	negativeConstraints := configConstrains(service.Placement.NegativeConstraints, api.NodeSelectorOpNotIn)
+	if len(positiveConstraints) != 0 || len(negativeConstraints) != 0 {
+		affinity = &api.Affinity{
+			NodeAffinity: &api.NodeAffinity{
+				RequiredDuringSchedulingIgnoredDuringExecution: &api.NodeSelector{
+					NodeSelectorTerms: []api.NodeSelectorTerm{
+						{
+							MatchExpressions: append(positiveConstraints, negativeConstraints...),
+						},
+					},
+				},
+			},
+		}
+	}
+	return affinity
+}
+
+// ConfigTopologySpreadConstraints configures the TopologySpreadConstraints.
+func ConfigTopologySpreadConstraints(service kobject.ServiceConfig) []api.TopologySpreadConstraint {
+	preferencesLen := len(service.Placement.Preferences)
+	constraints := make([]api.TopologySpreadConstraint, 0, preferencesLen)
+
+	// Placement preferences are ignored for global services
+	if service.DeployMode == "global" {
+		log.Warnf("Ignore placement preferences for global service %s", service.Name)
+		return constraints
+	}
+
+	for i, p := range service.Placement.Preferences {
+		constraints = append(constraints, api.TopologySpreadConstraint{
+			// According to the order of preferences, the MaxSkew decreases in order
+			// The minimum value is 1
+			MaxSkew:           int32(preferencesLen - i),
+			TopologyKey:       p,
+			WhenUnsatisfiable: api.ScheduleAnyway,
+			LabelSelector: &metav1.LabelSelector{
+				MatchLabels: transformer.ConfigLabels(service.Name),
+			},
+		})
+	}
+
+	return constraints
+}
+
+func configConstrains(constrains map[string]string, operator api.NodeSelectorOperator) []api.NodeSelectorRequirement {
+	constraintsLen := len(constrains)
+	rs := make([]api.NodeSelectorRequirement, 0, constraintsLen)
+	if constraintsLen == 0 {
+		return rs
+	}
+	for k, v := range constrains {
+		r := api.NodeSelectorRequirement{
+			Key:      k,
+			Operator: operator,
+			Values:   []string{v},
+		}
+		rs = append(rs, r)
+	}
+	return rs
+}
+
+// CreateWorkloadAndConfigMapObjects generates a Kubernetes artifact for each input type service
+func (k *Kubernetes) CreateWorkloadAndConfigMapObjects(name string, service kobject.ServiceConfig, opt kobject.ConvertOptions) []runtime.Object {
 	var objects []runtime.Object
 	var replica int
 
@@ -1038,7 +1181,7 @@ func (k *Kubernetes) CreateKubernetesObjects(name string, service kobject.Servic
 	}
 
 	if len(service.Configs) > 0 {
-		objects = k.createConfigMapFromComposeConfig(name, opt, service, objects)
+		objects = k.createConfigMapFromComposeConfig(name, service, objects)
 	}
 
 	if opt.CreateD || opt.Controller == DeploymentController {
@@ -1049,9 +1192,13 @@ func (k *Kubernetes) CreateKubernetesObjects(name string, service kobject.Servic
 		objects = append(objects, k.InitDS(name, service))
 	}
 
+	if opt.Controller == StatefulStateController {
+		objects = append(objects, k.InitSS(name, service, replica))
+	}
+
 	if len(service.EnvFile) > 0 {
 		for _, envFile := range service.EnvFile {
-			configMap := k.InitConfigMapForEnv(name, service, opt, envFile)
+			configMap := k.InitConfigMapForEnv(name, opt, envFile)
 			objects = append(objects, configMap)
 		}
 	}
@@ -1059,7 +1206,7 @@ func (k *Kubernetes) CreateKubernetesObjects(name string, service kobject.Servic
 	return objects
 }
 
-func (k *Kubernetes) createConfigMapFromComposeConfig(name string, opt kobject.ConvertOptions, service kobject.ServiceConfig, objects []runtime.Object) []runtime.Object {
+func (k *Kubernetes) createConfigMapFromComposeConfig(name string, service kobject.ServiceConfig, objects []runtime.Object) []runtime.Object {
 	for _, config := range service.Configs {
 		currentConfigName := config.Source
 		currentConfigObj := service.ConfigsMetaData[currentConfigName]
@@ -1091,7 +1238,7 @@ func (k *Kubernetes) InitPod(name string, service kobject.ServiceConfig) *api.Po
 }
 
 // CreateNetworkPolicy initializes Network policy
-func (k *Kubernetes) CreateNetworkPolicy(name string, networkName string) (*networkingv1.NetworkPolicy, error) {
+func (k *Kubernetes) CreateNetworkPolicy(networkName string) (*networkingv1.NetworkPolicy, error) {
 	str := "true"
 	np := &networkingv1.NetworkPolicy{
 		TypeMeta: metav1.TypeMeta{
@@ -1119,6 +1266,81 @@ func (k *Kubernetes) CreateNetworkPolicy(name string, networkName string) (*netw
 	return np, nil
 }
 
+func buildServiceImage(opt kobject.ConvertOptions, service kobject.ServiceConfig, name string) error {
+	// Must build the images before conversion (got to add service.Image in case 'image' key isn't provided
+	// Check that --build is set to true
+	// Check to see if there is an InputFile (required!) before we build the container
+	// Check that there's actually a Build key
+	// Lastly, we must have an Image name to continue
+	if opt.Build == "local" && opt.InputFiles != nil && service.Build != "" {
+		// If there's no "image" key, use the name of the container that's built
+		if service.Image == "" {
+			service.Image = name
+		}
+
+		if service.Image == "" {
+			return fmt.Errorf("image key required within build parameters in order to build and push service '%s'", name)
+		}
+
+		log.Infof("Build key detected. Attempting to build image '%s'", service.Image)
+
+		// Build the image!
+		err := transformer.BuildDockerImage(service, name)
+		if err != nil {
+			return errors.Wrapf(err, "Unable to build Docker image for service %v", name)
+		}
+
+		// Push the built image to the repo!
+		err = transformer.PushDockerImageWithOpt(service, name, opt)
+		if err != nil {
+			return errors.Wrapf(err, "Unable to push Docker image for service %v", name)
+		}
+	}
+	return nil
+}
+
+func (k *Kubernetes) configKubeServiceAndIngressForService(service kobject.ServiceConfig, name string, objects *[]runtime.Object) {
+	if k.PortsExist(service) {
+		if service.ServiceType == "LoadBalancer" {
+			svcs := k.CreateLBService(name, service)
+			for _, svc := range svcs {
+				*objects = append(*objects, svc)
+			}
+			if len(svcs) > 1 {
+				log.Warningf("Create multiple service to avoid using mixed protocol in the same service when it's loadbalancer type")
+			}
+		} else {
+			svc := k.CreateService(name, service)
+			*objects = append(*objects, svc)
+			if service.ExposeService != "" {
+				*objects = append(*objects, k.initIngress(name, service, svc.Spec.Ports[0].Port))
+			}
+		}
+	} else {
+		if service.ServiceType == "Headless" {
+			svc := k.CreateHeadlessService(name, service)
+			*objects = append(*objects, svc)
+		} else {
+			log.Warnf("Service %q won't be created because 'ports' is not specified", service.Name)
+		}
+	}
+}
+
+func (k *Kubernetes) configNetworkPolicyForService(service kobject.ServiceConfig, name string, objects *[]runtime.Object) error {
+	if len(service.Network) > 0 {
+		for _, net := range service.Network {
+			log.Infof("Network %s is detected at Source, shall be converted to equivalent NetworkPolicy at Destination", net)
+			np, err := k.CreateNetworkPolicy(net)
+
+			if err != nil {
+				return errors.Wrapf(err, "Unable to create Network Policy for network %v for service %v", net, name)
+			}
+			*objects = append(*objects, np)
+		}
+	}
+	return nil
+}
+
 // Transform maps komposeObject to k8s objects
 // returns object that are already sorted in the way that Services are first
 func (k *Kubernetes) Transform(komposeObject kobject.KomposeObject, opt kobject.ConvertOptions) ([]runtime.Object, error) {
@@ -1134,103 +1356,67 @@ func (k *Kubernetes) Transform(komposeObject kobject.KomposeObject, opt kobject.
 			allobjects = append(allobjects, item)
 		}
 	}
-
-	if opt.MultipleContainerMode {
-		komposeObjectToServiceConfigGroupMapping := KomposeObjectToServiceConfigGroupMapping(komposeObject)
+	if opt.ServiceGroupMode != "" {
+		log.Debugf("Service group mode is: %s", opt.ServiceGroupMode)
+		komposeObjectToServiceConfigGroupMapping := KomposeObjectToServiceConfigGroupMapping(&komposeObject, opt)
 		for name, group := range komposeObjectToServiceConfigGroupMapping {
-			service := komposeObject.ServiceConfigs[name]
 			var objects []runtime.Object
+			podSpec := PodSpec{}
 
-			service.WithKomposeAnnotation = opt.WithKomposeAnnotation
-
-			// Must build the images before conversion (got to add service.Image in case 'image' key isn't provided
-			// Check that --build is set to true
-			// Check to see if there is an InputFile (required!) before we build the container
-			// Check that there's actually a Build key
-			// Lastly, we must have an Image name to continue
-			if opt.Build == "local" && opt.InputFiles != nil && service.Build != "" {
-				// If there's no "image" key, use the name of the container that's built
-				if service.Image == "" {
-					service.Image = name
-				}
-
-				if service.Image == "" {
-					return nil, fmt.Errorf("image key required within build parameters in order to build and push service '%s'", name)
-				}
-
-				log.Infof("Build key detected. Attempting to build image '%s'", service.Image)
-
-				// Build the image!
-				err := transformer.BuildDockerImage(service, name)
-				if err != nil {
-					return nil, errors.Wrapf(err, "Unable to build Docker image for service %v", name)
-				}
-
-				// Push the built image to the repo!
-				err = transformer.PushDockerImageWithOpt(service, name, opt)
-				if err != nil {
-					return nil, errors.Wrapf(err, "Unable to push Docker image for service %v", name)
+			// if using volume group, the name here will be a volume config string. reset to the first service name
+			if opt.ServiceGroupMode == "volume" {
+				if opt.ServiceGroupName != "" {
+					name = opt.ServiceGroupName
+				} else {
+					var names []string
+					for _, svc := range group {
+						names = append(names, svc.Name)
+					}
+					name = strings.Join(names, "-")
 				}
 			}
 
-			podSpec := PodSpec{}
-
 			// added a container
+			// ports conflict check between services
+			portsUses := map[string]bool{}
+
 			for _, service := range group {
+				// first do ports check
+				ports := ConfigPorts(service)
+				for _, port := range ports {
+					key := string(port.ContainerPort) + string(port.Protocol)
+					if portsUses[key] {
+						return nil, fmt.Errorf("detect ports conflict when group services, service: %s, port: %d", service.Name, port.ContainerPort)
+					}
+					portsUses[key] = true
+				}
+
+				log.Infof("Group Service %s to [%s]", service.Name, name)
+				service.WithKomposeAnnotation = opt.WithKomposeAnnotation
 				podSpec.Append(AddContainer(service, opt))
 
-				// Generate pod only and nothing more
-				if (service.Restart == "no" || service.Restart == "on-failure") && !opt.IsPodController() {
-					log.Infof("Create kubernetes pod instead of pod controller due to restart policy: %s", service.Restart)
-					pod := k.InitPod(name, service)
-					objects = append(objects, pod)
-				} else {
-					objects = k.CreateKubernetesObjects(name, service, opt)
+				if err := buildServiceImage(opt, service, service.Name); err != nil {
+					return nil, err
 				}
-
-				if k.PortsExist(service) {
-					if service.ServiceType == "LoadBalancer" {
-						svcs := k.CreateLBService(name, service, objects)
-						for _, svc := range svcs {
-							objects = append(objects, svc)
-						}
-						if len(svcs) > 1 {
-							log.Warningf("Create multiple service to avoid using mixed protocol in the same service when it's loadbalander type")
-						}
-					} else {
-						svc := k.CreateService(name, service, objects)
-						objects = append(objects, svc)
-						if service.ExposeService != "" {
-							objects = append(objects, k.initIngress(name, service, svc.Spec.Ports[0].Port))
-						}
-					}
-				} else {
-					if service.ServiceType == "Headless" {
-						svc := k.CreateHeadlessService(name, service, objects)
-						objects = append(objects, svc)
-					} else {
-						log.Warnf("Service %q won't be created because 'ports' is not specified", name)
-					}
-				}
+				// override..
+				objects = append(objects, k.CreateWorkloadAndConfigMapObjects(name, service, opt)...)
+				k.configKubeServiceAndIngressForService(service, name, &objects)
 
 				// Configure the container volumes.
 				volumesMount, volumes, pvc, cms, err := k.ConfigVolumes(name, service)
 				if err != nil {
 					return nil, errors.Wrap(err, "k.ConfigVolumes failed")
 				}
+				// Configure Tmpfs
+				if len(service.TmpFs) > 0 {
+					TmpVolumesMount, TmpVolumes := k.ConfigTmpfs(name, service)
+					volumes = append(volumes, TmpVolumes...)
+					volumesMount = append(volumesMount, TmpVolumesMount...)
+				}
 				podSpec.Append(
 					SetVolumeMounts(volumesMount),
 					SetVolumes(volumes),
 				)
-
-				// Configure Tmpfs
-				if len(service.TmpFs) > 0 {
-					TmpVolumesMount, TmpVolumes := k.ConfigTmpfs(name, service)
-
-					volumes = append(volumes, TmpVolumes...)
-
-					volumesMount = append(volumesMount, TmpVolumesMount...)
-				}
 
 				if pvc != nil {
 					// Looping on the slice pvc instead of `*objects = append(*objects, pvc...)`
@@ -1248,134 +1434,75 @@ func (k *Kubernetes) Transform(komposeObject kobject.KomposeObject, opt kobject.
 				}
 
 				podSpec.Append(
-					SetPorts(name, service),
+					SetPorts(service),
 					ImagePullPolicy(name, service),
 					RestartPolicy(name, service),
 					SecurityContext(name, service),
-					LivenessProbe(service),
-					ReadinessProbe(service),
 					HostName(service),
 					DomainName(service),
 					ResourcesLimits(service),
 					ResourcesRequests(service),
 					TerminationGracePeriodSeconds(name, service),
+					TopologySpreadConstraints(service),
 				)
 
 				if serviceAccountName, ok := service.Labels[compose.LabelServiceAccountName]; ok {
 					podSpec.Append(ServiceAccountName(serviceAccountName))
 				}
 
-				err = k.UpdateKubernetesObjectsMultipleContainers(name, service, opt, &objects, podSpec)
+				err = k.UpdateKubernetesObjectsMultipleContainers(name, service, &objects, podSpec)
 				if err != nil {
 					return nil, errors.Wrap(err, "Error transforming Kubernetes objects")
 				}
-			}
 
-			if len(service.Network) > 0 {
-				for _, net := range service.Network {
-					log.Infof("Network %s is detected at Source, shall be converted to equivalent NetworkPolicy at Destination", net)
-					np, err := k.CreateNetworkPolicy(name, net)
-
-					if err != nil {
-						return nil, errors.Wrapf(err, "Unable to create Network Policy for network %v for service %v", net, name)
-					}
-					objects = append(objects, np)
+				if err = k.configNetworkPolicyForService(service, service.Name, &objects); err != nil {
+					return nil, err
 				}
 			}
 
 			allobjects = append(allobjects, objects...)
 		}
-	} else {
-		sortedKeys := SortedKeys(komposeObject)
-		for _, name := range sortedKeys {
-			service := komposeObject.ServiceConfigs[name]
-			var objects []runtime.Object
+	}
+	sortedKeys := SortedKeys(komposeObject)
+	for _, name := range sortedKeys {
+		service := komposeObject.ServiceConfigs[name]
 
-			service.WithKomposeAnnotation = opt.WithKomposeAnnotation
-
-			// Must build the images before conversion (got to add service.Image in case 'image' key isn't provided
-			// Check that --build is set to true
-			// Check to see if there is an InputFile (required!) before we build the container
-			// Check that there's actually a Build key
-			// Lastly, we must have an Image name to continue
-			if opt.Build == "local" && opt.InputFiles != nil && service.Build != "" {
-				// If there's no "image" key, use the name of the container that's built
-				if service.Image == "" {
-					service.Image = name
-				}
-
-				if service.Image == "" {
-					return nil, fmt.Errorf("image key required within build parameters in order to build and push service '%s'", name)
-				}
-
-				log.Infof("Build key detected. Attempting to build image '%s'", service.Image)
-
-				// Build the image!
-				err := transformer.BuildDockerImage(service, name)
-				if err != nil {
-					return nil, errors.Wrapf(err, "Unable to build Docker image for service %v", name)
-				}
-
-				// Push the built image to the repo!
-				err = transformer.PushDockerImageWithOpt(service, name, opt)
-				if err != nil {
-					return nil, errors.Wrapf(err, "Unable to push Docker image for service %v", name)
-				}
-			}
-
-			// Generate pod only and nothing more
-			if (service.Restart == "no" || service.Restart == "on-failure") && !opt.IsPodController() {
-				log.Infof("Create kubernetes pod instead of pod controller due to restart policy: %s", service.Restart)
-				pod := k.InitPod(name, service)
-				objects = append(objects, pod)
-			} else {
-				objects = k.CreateKubernetesObjects(name, service, opt)
-			}
-
-			if k.PortsExist(service) {
-				if service.ServiceType == "LoadBalancer" {
-					svcs := k.CreateLBService(name, service, objects)
-					for _, svc := range svcs {
-						objects = append(objects, svc)
-					}
-					if len(svcs) > 1 {
-						log.Warningf("Create multiple service to avoid using mixed protocol in the same service when it's loadbalander type")
-					}
-				} else {
-					svc := k.CreateService(name, service, objects)
-					objects = append(objects, svc)
-					if service.ExposeService != "" {
-						objects = append(objects, k.initIngress(name, service, svc.Spec.Ports[0].Port))
-					}
-				}
-			} else {
-				if service.ServiceType == "Headless" {
-					svc := k.CreateHeadlessService(name, service, objects)
-					objects = append(objects, svc)
-				} else {
-					log.Warnf("Service %q won't be created because 'ports' is not specified", name)
-				}
-			}
-
-			err := k.UpdateKubernetesObjects(name, service, opt, &objects)
-			if err != nil {
-				return nil, errors.Wrap(err, "Error transforming Kubernetes objects")
-			}
-
-			if len(service.Network) > 0 {
-				for _, net := range service.Network {
-					log.Infof("Network %s is detected at Source, shall be converted to equivalent NetworkPolicy at Destination", net)
-					np, err := k.CreateNetworkPolicy(name, net)
-
-					if err != nil {
-						return nil, errors.Wrapf(err, "Unable to create Network Policy for network %v for service %v", net, name)
-					}
-					objects = append(objects, np)
-				}
-			}
-
-			allobjects = append(allobjects, objects...)
+		// if service belongs to a group, we already processed it
+		if service.InGroup {
+			continue
 		}
+
+		var objects []runtime.Object
+
+		service.WithKomposeAnnotation = opt.WithKomposeAnnotation
+
+		if err := buildServiceImage(opt, service, name); err != nil {
+			return nil, err
+		}
+
+		// Generate pod only and nothing more
+		if (service.Restart == "no" || service.Restart == "on-failure") && !opt.IsPodController() {
+			log.Infof("Create kubernetes pod instead of pod controller due to restart policy: %s", service.Restart)
+			pod := k.InitPod(name, service)
+			objects = append(objects, pod)
+		} else {
+			objects = k.CreateWorkloadAndConfigMapObjects(name, service, opt)
+		}
+
+		if opt.Controller == StatefulStateController {
+			service.ServiceType = "Headless"
+		}
+		k.configKubeServiceAndIngressForService(service, name, &objects)
+
+		err := k.UpdateKubernetesObjects(name, service, opt, &objects)
+		if err != nil {
+			return nil, errors.Wrap(err, "Error transforming Kubernetes objects")
+		}
+
+		if err := k.configNetworkPolicyForService(service, name, &objects); err != nil {
+			return nil, err
+		}
+		allobjects = append(allobjects, objects...)
 	}
 
 	// sort all object so Services are first
@@ -1396,6 +1523,12 @@ func (k *Kubernetes) UpdateController(obj runtime.Object, updateTemplate func(*a
 		}
 		updateMeta(&t.ObjectMeta)
 	case *appsv1.DaemonSet:
+		err = updateTemplate(&t.Spec.Template)
+		if err != nil {
+			return errors.Wrap(err, "updateTemplate failed")
+		}
+		updateMeta(&t.ObjectMeta)
+	case *appsv1.StatefulSet:
 		err = updateTemplate(&t.Spec.Template)
 		if err != nil {
 			return errors.Wrap(err, "updateTemplate failed")

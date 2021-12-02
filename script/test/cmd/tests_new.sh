@@ -102,3 +102,104 @@ convert::check_artifacts_generated "kompose --build local -f $relative_path conv
 # Should warn when push image disabled
 cmd="kompose -f $KOMPOSE_ROOT/script/test/fixtures/buildconfig/docker-compose-build-no-image.yml -o $TEMP_DIR/output_file convert --build=local --push-image-registry=whatever"
 convert::expect_warning "$cmd" "Push image registry 'whatever' is specified but push image is disabled, skipping pushing to repository"
+
+#TEST the kompose.volume.storage-class-name label
+convert::check_artifacts_generated "kompose -f $KOMPOSE_ROOT/script/test/fixtures/storage-class-name/docker-compose.yml convert -o $TEMP_DIR/output-k8s.json -j" "$TEMP_DIR/output-k8s.json"
+convert::check_artifacts_generated "kompose --provider=openshift -f $KOMPOSE_ROOT/script/test/fixtures/storage-class-name/docker-compose.yml convert -o $TEMP_DIR/output-os.json -j" "$TEMP_DIR/output-os.json"
+
+# TEST the windows volume
+# windows host path to windows container
+k8s_cmd="kompose -f $KOMPOSE_ROOT/script/test/fixtures/volume-mounts/windows/docker-compose.yaml convert --stdout -j --with-kompose-annotation=false"
+os_cmd="kompose --provider=openshift -f $KOMPOSE_ROOT/script/test/fixtures/volume-mounts/windows/docker-compose.yaml convert --stdout -j --with-kompose-annotation=false"
+k8s_output="$KOMPOSE_ROOT/script/test/fixtures/volume-mounts/windows/output-k8s.json"
+os_output="$KOMPOSE_ROOT/script/test/fixtures/volume-mounts/windows/output-os.json"
+convert::expect_success "$k8s_cmd" "$k8s_output"
+convert::expect_success "$os_cmd" "$os_output"
+
+# TEST the placement
+# should convert placement to affinity
+k8s_cmd="kompose -f $KOMPOSE_ROOT/script/test/fixtures/deploy/placement/docker-compose-placement.yaml convert --stdout -j --with-kompose-annotation=false"
+os_cmd="kompose --provider=openshift -f $KOMPOSE_ROOT/script/test/fixtures/deploy/placement/docker-compose-placement.yaml convert --stdout -j --with-kompose-annotation=false"
+k8s_output="$KOMPOSE_ROOT/script/test/fixtures/deploy/placement/output-placement-k8s.json"
+os_output="$KOMPOSE_ROOT/script/test/fixtures/deploy/placement/output-placement-os.json"
+convert::expect_success_and_warning "$k8s_cmd" "$k8s_output"
+convert::expect_success_and_warning "$os_cmd" "$os_output"
+
+
+# test configmap volume
+k8s_cmd="kompose -f $KOMPOSE_ROOT/script/test/fixtures/configmap-volume/docker-compose.yml convert --stdout -j --with-kompose-annotation=false --volumes=configMap"
+os_cmd="kompose  --provider=openshift -f $KOMPOSE_ROOT/script/test/fixtures/configmap-volume/docker-compose.yml convert --stdout -j --with-kompose-annotation=false --volumes=configMap"
+k8s_output="$KOMPOSE_ROOT/script/test/fixtures/configmap-volume/output-k8s.json"
+os_output="$KOMPOSE_ROOT/script/test/fixtures/configmap-volume/output-os.json"
+convert::expect_success_and_warning "$k8s_cmd" "$k8s_output"
+convert::expect_success "$os_cmd" "$os_output"
+
+# test configmap volume using service label
+k8s_cmd="kompose -f $KOMPOSE_ROOT/script/test/fixtures/configmap-volume/docker-compose-withlabel.yml convert --stdout -j --with-kompose-annotation=false"
+os_cmd="kompose  --provider=openshift -f $KOMPOSE_ROOT/script/test/fixtures/configmap-volume/docker-compose-withlabel.yml convert --stdout -j --with-kompose-annotation=false"
+k8s_output="$KOMPOSE_ROOT/script/test/fixtures/configmap-volume/output-k8s-withlabel.json"
+os_output="$KOMPOSE_ROOT/script/test/fixtures/configmap-volume/output-os-withlabel.json"
+convert::expect_success_and_warning "$k8s_cmd" "$k8s_output"
+convert::expect_success "$os_cmd" "$os_output"
+
+# Test that emptyDir works
+k8s_cmd="kompose -f $KOMPOSE_ROOT/script/test/fixtures/change-in-volume/docker-compose.yml convert --with-kompose-annotation=false --stdout -j --volumes emptyDir"
+k8s_output="$KOMPOSE_ROOT/script/test/fixtures/change-in-volume/output-k8s-empty-vols-template.json"
+os_cmd="kompose --provider=openshift -f $KOMPOSE_ROOT/script/test/fixtures/change-in-volume/docker-compose.yml convert --with-kompose-annotation=false --stdout -j --volumes emptyDir"
+os_output="$KOMPOSE_ROOT/script/test/fixtures/change-in-volume/output-os-empty-vols-template.json"
+convert::expect_success_and_warning "$k8s_cmd" "$k8s_output"
+convert::expect_success_and_warning "$os_cmd" "$os_output"
+
+# Test that emptyvols works
+k8s_cmd="kompose -f $KOMPOSE_ROOT/script/test/fixtures/change-in-volume/docker-compose.yml convert --with-kompose-annotation=false --stdout -j --emptyvols"
+k8s_output="$KOMPOSE_ROOT/script/test/fixtures/change-in-volume/output-k8s-empty-vols-template.json"
+os_cmd="kompose --provider=openshift -f $KOMPOSE_ROOT/script/test/fixtures/change-in-volume/docker-compose.yml convert --with-kompose-annotation=false --stdout -j --emptyvols"
+os_output="$KOMPOSE_ROOT/script/test/fixtures/change-in-volume/output-os-empty-vols-template.json"
+convert::expect_success_and_warning "$k8s_cmd" "$k8s_output"
+convert::expect_success_and_warning "$os_cmd" "$os_output"
+
+# test service expose
+k8s_cmd="kompose -f $KOMPOSE_ROOT/script/test/fixtures/expose/compose.yaml convert --stdout -j --with-kompose-annotation=false"
+ocp_cmd="kompose  --provider=openshift -f $KOMPOSE_ROOT/script/test/fixtures/expose/compose.yaml convert --stdout -j --with-kompose-annotation=false"
+k8s_output="$KOMPOSE_ROOT/script/test/fixtures/expose/output-k8s.json"
+ocp_output="$KOMPOSE_ROOT/script/test/fixtures/expose/output-ocp.json"
+convert::expect_success "$k8s_cmd" "$k8s_output"
+convert::expect_success "$ocp_cmd" "$ocp_output"
+
+
+# test service group by volume, not support openshift for now
+k8s_cmd="kompose -f $KOMPOSE_ROOT/script/test/fixtures/service-group/compose.yaml convert --stdout -j --with-kompose-annotation=false --service-group-mode=volume"
+k8s_output="$KOMPOSE_ROOT/script/test/fixtures/service-group/output-k8s.json"
+convert::expect_success_and_warning "$k8s_cmd" "$k8s_output"
+
+# test merge multiple compose files
+k8s_cmd="kompose -f $KOMPOSE_ROOT/script/test/fixtures/multiple-files/first.yaml -f $KOMPOSE_ROOT/script/test/fixtures/multiple-files/second.yaml convert --stdout -j --with-kompose-annotation=false"
+ocp_cmd="kompose  --provider=openshift -f $KOMPOSE_ROOT/script/test/fixtures/multiple-files/first.yaml -f $KOMPOSE_ROOT/script/test/fixtures/multiple-files/second.yaml convert --stdout -j --with-kompose-annotation=false"
+k8s_output="$KOMPOSE_ROOT/script/test/fixtures/multiple-files/output-k8s.json"
+ocp_output="$KOMPOSE_ROOT/script/test/fixtures/multiple-files/output-ocp.json"
+convert::expect_success_and_warning "$k8s_cmd" "$k8s_output"
+convert::expect_success "$ocp_cmd" "$ocp_output"
+
+# test health check
+k8s_cmd="kompose -f $KOMPOSE_ROOT/script/test/fixtures/healthcheck/docker-compose-healthcheck.yaml convert --stdout -j --service-group-mode=label --with-kompose-annotation=false"
+os_cmd="kompose --provider=openshift -f $KOMPOSE_ROOT/script/test/fixtures/healthcheck/docker-compose-healthcheck.yaml convert --stdout -j --service-group-mode=label --with-kompose-annotation=false"
+k8s_output="$KOMPOSE_ROOT/script/test/fixtures/healthcheck/output-healthcheck-k8s.json"
+os_output="$KOMPOSE_ROOT/script/test/fixtures/healthcheck/output-healthcheck-os.json"
+convert::expect_success "$k8s_cmd" "$k8s_output"
+convert::expect_success "$os_cmd" "$os_output"
+
+# test statefulset
+k8s_cmd="kompose -f $KOMPOSE_ROOT/script/test/fixtures/statefulset/docker-compose.yaml convert --stdout -j --with-kompose-annotation=false --controller statefulset"
+ocp_cmd="kompose --provider=openshift -f $KOMPOSE_ROOT/script/test/fixtures/statefulset/docker-compose.yaml convert --stdout -j --with-kompose-annotation=false --controller statefulset"
+k8s_output="$KOMPOSE_ROOT/script/test/fixtures/statefulset/output-k8s.json"
+ocp_output="$KOMPOSE_ROOT/script/test/fixtures/statefulset/output-os.json"
+convert::expect_success "$k8s_cmd" "$k8s_output"
+convert::expect_success "$ocp_cmd" "$ocp_output"
+
+# test specifying volume type using service label
+k8s_cmd="kompose -f $KOMPOSE_ROOT/script/test/fixtures/multiple-type-volumes/docker-compose.yaml convert --stdout -j --with-kompose-annotation=false"
+os_cmd="kompose  --provider=openshift -f  $KOMPOSE_ROOT/script/test/fixtures/multiple-type-volumes/docker-compose.yaml  convert --stdout -j --with-kompose-annotation=false"
+k8s_output="$KOMPOSE_ROOT/script/test/fixtures/multiple-type-volumes/output-k8s.json"
+os_output="$KOMPOSE_ROOT/script/test/fixtures/multiple-type-volumes/output-os.json"
+convert::expect_success_and_warning "$k8s_cmd" "$k8s_output"
+convert::expect_success "$os_cmd" "$os_output"

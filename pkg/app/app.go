@@ -17,6 +17,7 @@ limitations under the License.
 package app
 
 import (
+	"fmt"
 	"strings"
 
 	log "github.com/sirupsen/logrus"
@@ -53,10 +54,7 @@ const (
 var inputFormat = "compose"
 
 // ValidateFlags validates all command line flags
-func ValidateFlags(bundle string, args []string, cmd *cobra.Command, opt *kobject.ConvertOptions) {
-	// Check to see if the "file" has changed from the default flag value
-	isFileSet := cmd.Flags().Lookup("file").Changed
-
+func ValidateFlags(args []string, cmd *cobra.Command, opt *kobject.ConvertOptions) {
 	if opt.OutFile == "-" {
 		opt.ToStdout = true
 		opt.OutFile = ""
@@ -127,16 +125,6 @@ func ValidateFlags(bundle string, args []string, cmd *cobra.Command, opt *kobjec
 		log.Fatalf("Error: --replicas cannot be negative")
 	}
 
-	if len(bundle) > 0 {
-		inputFormat = "bundle"
-		log.Fatalf("DAB / bundle (--bundle | -b) is no longer supported. See issue: https://github.com/kubernetes/kompose/issues/390")
-		opt.InputFiles = []string{bundle}
-	}
-
-	if len(bundle) > 0 && isFileSet {
-		log.Fatalf("Error: 'compose' file and 'dab' file cannot be specified at the same time")
-	}
-
 	if len(args) != 0 {
 		log.Fatal("Unknown Argument(s): ", strings.Join(args, ","))
 	}
@@ -145,8 +133,12 @@ func ValidateFlags(bundle string, args []string, cmd *cobra.Command, opt *kobjec
 		log.Fatalf("YAML and JSON format cannot be provided at the same time")
 	}
 
-	if opt.Volumes != "persistentVolumeClaim" && opt.Volumes != "emptyDir" && opt.Volumes != "hostPath" && opt.Volumes != "configMap" {
-		log.Fatal("Unknown Volume type: ", opt.Volumes, ", possible values are: persistentVolumeClaim, hostPath, configMap and emptyDir")
+	if _, ok := kubernetes.ValidVolumeSet[opt.Volumes]; !ok {
+		validVolumesTypes := make([]string, 0)
+		for validVolumeType := range kubernetes.ValidVolumeSet {
+			validVolumesTypes = append(validVolumesTypes, fmt.Sprintf("'%s'", validVolumeType))
+		}
+		log.Fatal("Unknown Volume type: ", opt.Volumes, ", possible values are: ", strings.Join(validVolumesTypes, " "))
 	}
 }
 

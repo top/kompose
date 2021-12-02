@@ -34,6 +34,7 @@ Installation methods:
   - [CentOS](/docs/installation.md#centos)
   - [Fedora](/docs/installation.md#fedora)
   - [openSUSE/SLE](/docs/installation.md#opensusesle)
+  - [Ubuntu/Debian](/docs/installation.md#ubuntudebian)
   - [macOS (Homebrew and MacPorts)](/docs/installation.md#macos)
   - [Windows](/docs/installation.md#windows)
 
@@ -45,10 +46,10 @@ __Linux and macOS:__
 
 ```sh
 # Linux
-curl -L https://github.com/kubernetes/kompose/releases/download/v1.23.0/kompose-linux-amd64 -o kompose
+curl -L https://github.com/kubernetes/kompose/releases/download/v1.26.0/kompose-linux-amd64 -o kompose
 
 # macOS
-curl -L https://github.com/kubernetes/kompose/releases/download/v1.23.0/kompose-darwin-amd64 -o kompose
+curl -L https://github.com/kubernetes/kompose/releases/download/v1.26.0/kompose-darwin-amd64 -o kompose
 
 chmod +x kompose
 sudo mv ./kompose /usr/local/bin/kompose
@@ -56,7 +57,7 @@ sudo mv ./kompose /usr/local/bin/kompose
 
 __Windows:__
 
-Download from [GitHub](https://github.com/kubernetes/kompose/releases/download/v1.23.0/kompose-windows-amd64.exe) and add the binary to your PATH.
+Download from [GitHub](https://github.com/kubernetes/kompose/releases/download/v1.26.0/kompose-windows-amd64.exe) and add the binary to your PATH.
 
 ## Shell autocompletion
 
@@ -86,15 +87,19 @@ __Steps:__
 ```console
 $ git clone https://github.com/kubernetes/kompose.git $GOPATH/src/github.com/kubernetes/kompose
 ```
-2. Build with `make`
+2. Change directory to the cloned repo.
+```console
+cd $GOPATH/src/github.com/kubernetes/kompose
+```
+3. Build with `make`
 ```console
 $ make bin
 ```
-3. Or build with `go`
+4. Or build with `go`
 ```console
 $ go build -o kompose main.go
 ```
-4. Test your changes
+5. Test your changes
 ```console
 $ make test
 ```

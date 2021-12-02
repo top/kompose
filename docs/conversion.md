@@ -1,3 +1,10 @@
+---
+layout: default
+permalink: /conversion/
+redirect_from: 
+  - /docs/conversion.md/
+---
+
 # Conversion Matrix
 
 This document outlines all possible conversion details regarding `docker-compose.yaml` values to Kubernetes / OpenShift artifacts. This covers *major* versions of Docker Compose such as 1, 2 and 3.
@@ -31,7 +38,7 @@ __Glossary:__
 | deploy                 | -  | -  | ✓  |                                                             |                                                                                                                |
 | deploy: mode           | -  | -  | ✓  |                                                             |                                                                                                                |
 | deploy: replicas       | -  | -  | ✓  | Deployment.Spec.Replicas / DeploymentConfig.Spec.Replicas   |                                                                                                                |
-| deploy: placement      | -  | -  | ✓  | Pod.Spec.NodeSelector                                       |                                                                                                                |
+| deploy: placement      | -  | -  | ✓  | Pod.Spec.Affinity                                           |                                                                                                                |
 | deploy: update_config  | -  | -  | ✓  | Workload.Spec.Strategy                                      | Deployment / DeploymentConfig                                                                                                               |
 | deploy: resources      | -  | -  | ✓  | Containers.Resources.Limits.Memory / Containers.Resources.Limits.CPU | Support for memory as well as cpu                                                                     |
 | deploy: restart_policy | -  | -  | ✓  | Pod generation                                              | This generated a Pod, see the [user guide on restart](http://kompose.io/user-guide/#restart)                   |

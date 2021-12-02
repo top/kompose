@@ -60,10 +60,18 @@ const (
 	HealthCheckReadinessRetries = "kompose.service.healthcheck.readiness.retries"
 	// HealthCheckReadinessStartPeriod defines readiness health check start period
 	HealthCheckReadinessStartPeriod = "kompose.service.healthcheck.readiness.start_period"
+	// HealthCheckReadinessHTTPGetPath defines readiness health check HttpGet path
+	HealthCheckReadinessHTTPGetPath = "kompose.service.healthcheck.readiness.http_get_path"
+	// HealthCheckReadinessHTTPGetPort defines readiness health check HttpGet port
+	HealthCheckReadinessHTTPGetPort = "kompose.service.healthcheck.readiness.http_get_port"
+	// HealthCheckReadinessTCPPort defines readiness health check tcp port
+	HealthCheckReadinessTCPPort = "kompose.service.healthcheck.readiness.tcp_port"
 	// HealthCheckLivenessHTTPGetPath defines liveness health check HttpGet path
 	HealthCheckLivenessHTTPGetPath = "kompose.service.healthcheck.liveness.http_get_path"
 	// HealthCheckLivenessHTTPGetPort defines liveness health check HttpGet port
 	HealthCheckLivenessHTTPGetPort = "kompose.service.healthcheck.liveness.http_get_port"
+	// HealthCheckLivenessTCPPort defines liveness health check tcp port
+	HealthCheckLivenessTCPPort = "kompose.service.healthcheck.liveness.tcp_port"
 
 	// ServiceTypeHeadless ...
 	ServiceTypeHeadless = "Headless"
@@ -156,7 +164,7 @@ func normalizeVolumes(svcName string) string {
 
 func normalizeNetworkNames(netName string) (string, error) {
 	netval := strings.ToLower(strings.Replace(netName, "_", "-", -1))
-	regString := ("[^A-Za-z0-9.-]+")
+	regString := "[^A-Za-z0-9.-]+"
 	reg, err := regexp.Compile(regString)
 	if err != nil {
 		return "", err

@@ -60,6 +60,9 @@ var (
 	// MultipleContainerMode which enables creating multi containers in a single pod is a developping function.
 	// default is false
 	MultipleContainerMode bool
+
+	ServiceGroupMode string
+	ServiceGroupName string
 )
 
 var convertCmd = &cobra.Command{
@@ -104,10 +107,15 @@ var convertCmd = &cobra.Command{
 			YAMLIndent:                  ConvertYAMLIndent,
 			WithKomposeAnnotation:       WithKomposeAnnotation,
 			MultipleContainerMode:       MultipleContainerMode,
+			ServiceGroupMode:            ServiceGroupMode,
+			ServiceGroupName:            ServiceGroupName,
 		}
 
-		// Validate before doing anything else. Use "bundle" if passed in.
-		app.ValidateFlags(GlobalBundle, args, cmd, &ConvertOpt)
+		if ServiceGroupMode == "" && MultipleContainerMode {
+			ConvertOpt.ServiceGroupMode = "label"
+		}
+
+		app.ValidateFlags(args, cmd, &ConvertOpt)
 		app.ValidateComposeFile(&ConvertOpt)
 	},
 	Run: func(cmd *cobra.Command, args []string) {
@@ -134,6 +142,9 @@ func init() {
 	convertCmd.Flags().MarkHidden("replication-controller")
 	convertCmd.Flags().MarkHidden("deployment")
 	convertCmd.Flags().BoolVar(&MultipleContainerMode, "multiple-container-mode", false, "Create multiple containers grouped by 'kompose.service.group' label")
+	convertCmd.Flags().StringVar(&ServiceGroupMode, "service-group-mode", "", "Group multiple service to create single workload by `label`(`kompose.service.group`) or `volume`(shared volumes)")
+	convertCmd.Flags().StringVar(&ServiceGroupName, "service-group-name", "", "Using with --service-group-mode=volume to specific a final service name for the group")
+	convertCmd.Flags().MarkDeprecated("multiple-container-mode", "use --service-group-mode=label")
 
 	// OpenShift only
 	convertCmd.Flags().BoolVar(&ConvertDeploymentConfig, "deployment-config", true, "Generate an OpenShift deploymentconfig object")
@@ -164,7 +175,7 @@ func init() {
 
 	// Deprecated commands
 	convertCmd.Flags().BoolVar(&ConvertEmptyVols, "emptyvols", false, "Use Empty Volumes. Do not generate PVCs")
-	convertCmd.Flags().MarkDeprecated("emptyvols", "emptyvols has been marked as deprecated. Use --volumes empty")
+	convertCmd.Flags().MarkDeprecated("emptyvols", "emptyvols has been marked as deprecated. Use --volumes emptyDir")
 
 	convertCmd.Flags().IntVar(&ConvertYAMLIndent, "indent", 2, "Spaces length to indent generated yaml files")
 
@@ -183,15 +194,14 @@ Available Commands:{{range .Commands}}{{if .IsAvailableCommand}}
   {{rpad .Name .NamePadding }} {{.Short}}{{end}}{{end}}{{end}}{{ if .HasAvailableLocalFlags}}
 
 Kubernetes Flags:
-      --daemon-set               Generate a Kubernetes daemonset object (deprecated, use --controller instead)
-  -d, --deployment               Generate a Kubernetes deployment object (deprecated, use --controller instead)
   -c, --chart                    Create a Helm chart for converted objects
-      --replication-controller   Generate a Kubernetes replication controller object (deprecated, use --controller instead)
+      --controller               Set the output controller ("deployment"|"daemonSet"|"replicationController")
+      --service-group-mode       Group multiple service to create single workload by "label"("kompose.service.group") or "volume"(shared volumes)
+      --service-group-name       Using with --service-group-mode=volume to specific a final service name for the group
 
 OpenShift Flags:
       --build-branch             Specify repository branch to use for buildconfig (default is current branch name)
       --build-repo               Specify source repository for buildconfig (default is current branch's remote url)
-      --deployment-config        Generate an OpenShift deployment config object
       --insecure-repository      Specify to use insecure docker repository while generating Openshift image stream object
 
 Flags:

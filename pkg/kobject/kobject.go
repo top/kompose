@@ -26,7 +26,6 @@ import (
 	"github.com/pkg/errors"
 	"github.com/spf13/cast"
 	v1 "k8s.io/api/apps/v1"
-	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 )
 
@@ -81,6 +80,8 @@ type ConvertOptions struct {
 	WithKomposeAnnotation bool
 
 	MultipleContainerMode bool
+	ServiceGroupMode      string
+	ServiceGroupName      string
 }
 
 // IsPodController indicate if the user want to use a controller
@@ -91,6 +92,7 @@ func (opt *ConvertOptions) IsPodController() bool {
 type ServiceConfigGroup []ServiceConfig
 
 // ServiceConfig holds the basic struct of a container
+// which should not introduce any kubernetes specific struct
 type ServiceConfig struct {
 	Name              string
 	ContainerName     string
@@ -145,14 +147,15 @@ type ServiceConfig struct {
 	GroupAdd           []int64                     `compose:"group_add"`
 	Volumes            []Volumes                   `compose:""`
 	Secrets            []dockerCliTypes.ServiceSecretConfig
-	HealthChecks       HealthChecks      `compose:""`
-	Placement          map[string]string `compose:""`
+	HealthChecks       HealthChecks `compose:""`
+	Placement          Placement    `compose:""`
 	//This is for long LONG SYNTAX link(https://docs.docker.com/compose/compose-file/#long-syntax)
 	Configs []dockerCliTypes.ServiceConfigObjConfig `compose:""`
 	//This is for SHORT SYNTAX link(https://docs.docker.com/compose/compose-file/#configs)
 	ConfigsMetaData map[string]dockerCliTypes.ConfigObjConfig `compose:""`
 
 	WithKomposeAnnotation bool `compose:""`
+	InGroup               bool
 }
 
 // HealthChecks used to distinguish between liveness and readiness
@@ -162,7 +165,7 @@ type HealthChecks struct {
 }
 
 // HealthCheck the healthcheck configuration for a service
-// "StartPeriod" is not yet added to compose, see:
+// "StartPeriod" was added to v3.4 of the compose, see:
 // https://github.com/docker/cli/issues/116
 type HealthCheck struct {
 	Test        []string
@@ -173,6 +176,7 @@ type HealthCheck struct {
 	Disable     bool
 	HTTPPath    string
 	HTTPPort    int32
+	TCPPort     int32
 }
 
 // EnvVar holds the environment variable struct of a container
@@ -186,7 +190,12 @@ type Ports struct {
 	HostPort      int32
 	ContainerPort int32
 	HostIP        string
-	Protocol      corev1.Protocol
+	Protocol      string // Upper string
+}
+
+// ID returns an unique id for this port settings, to avoid conflict
+func (port *Ports) ID() string {
+	return string(port.ContainerPort) + port.Protocol
 }
 
 // Volumes holds the volume struct of container
@@ -201,6 +210,13 @@ type Volumes struct {
 	PVCName       string // name of PVC
 	PVCSize       string // PVC size
 	SelectorValue string // Value of the label selector
+}
+
+// Placement holds the placement struct of container
+type Placement struct {
+	PositiveConstraints map[string]string
+	NegativeConstraints map[string]string
+	Preferences         []string
 }
 
 // GetConfigMapKeyFromMeta ...
