@@ -19,7 +19,6 @@ package kubernetes
 import (
 	"encoding/base64"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"path"
 	"path/filepath"
@@ -29,6 +28,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/compose-spec/compose-go/types"
 	"github.com/fatih/structs"
 	"github.com/kubernetes/kompose/pkg/kobject"
 	"github.com/kubernetes/kompose/pkg/loader/compose"
@@ -57,6 +57,7 @@ type Kubernetes struct {
 // PVCRequestSize (Persistent Volume Claim) has default size
 const PVCRequestSize = "100Mi"
 
+// ValidVolumeSet has the different types of valid volumes
 var ValidVolumeSet = map[string]struct{}{"emptyDir": {}, "hostPath": {}, "configMap": {}, "persistentVolumeClaim": {}}
 
 const (
@@ -127,7 +128,7 @@ func (k *Kubernetes) InitPodSpec(name string, image string, pullSecret string) a
 	return pod
 }
 
-//InitPodSpecWithConfigMap creates the pod specification
+// InitPodSpecWithConfigMap creates the pod specification
 func (k *Kubernetes) InitPodSpecWithConfigMap(name string, image string, service kobject.ServiceConfig) api.PodSpec {
 	var volumeMounts []api.VolumeMount
 	var volumes []api.Volume
@@ -244,7 +245,7 @@ func (k *Kubernetes) InitConfigMapForEnv(name string, opt kobject.ConvertOptions
 
 // IntiConfigMapFromFileOrDir will create a configmap from dir or file
 // usage:
-//   1. volume
+//  1. volume
 func (k *Kubernetes) IntiConfigMapFromFileOrDir(name, cmName, filePath string, service kobject.ServiceConfig) (*api.ConfigMap, error) {
 	configMap := &api.ConfigMap{
 		TypeMeta: metav1.TypeMeta{
@@ -265,7 +266,7 @@ func (k *Kubernetes) IntiConfigMapFromFileOrDir(name, cmName, filePath string, s
 
 	switch mode := fi.Mode(); {
 	case mode.IsDir():
-		files, err := ioutil.ReadDir(filePath)
+		files, err := os.ReadDir(filePath)
 		if err != nil {
 			return nil, err
 		}
@@ -323,7 +324,7 @@ func initConfigMapData(configMap *api.ConfigMap, data map[string]string) {
 	configMap.BinaryData = binData
 }
 
-//InitConfigMapFromFile initializes a ConfigMap object
+// InitConfigMapFromFile initializes a ConfigMap object
 func (k *Kubernetes) InitConfigMapFromFile(name string, service kobject.ServiceConfig, fileName string) *api.ConfigMap {
 	content, err := GetContentFromFile(fileName)
 	if err != nil {
@@ -420,6 +421,9 @@ func (k *Kubernetes) InitDS(name string, service kobject.ServiceConfig) *appsv1.
 			Labels: transformer.ConfigAllLabels(name, &service),
 		},
 		Spec: appsv1.DaemonSetSpec{
+			Selector: &metav1.LabelSelector{
+				MatchLabels: transformer.ConfigLabels(name),
+			},
 			Template: api.PodTemplateSpec{
 				Spec: k.InitPodSpec(name, service.Image, service.ImagePullSecret),
 			},
@@ -428,6 +432,7 @@ func (k *Kubernetes) InitDS(name string, service kobject.ServiceConfig) *appsv1.
 	return ds
 }
 
+// InitSS method initialize a stateful set
 func (k *Kubernetes) InitSS(name string, service kobject.ServiceConfig, replicas int) *appsv1.StatefulSet {
 	var podSpec api.PodSpec
 	if len(service.Configs) > 0 {
@@ -525,8 +530,8 @@ func (k *Kubernetes) initIngress(name string, service kobject.ServiceConfig, por
 		}
 	}
 
-	if service.ExposeServiceIngressClassName != nil {
-		ingress.Spec.IngressClassName = service.ExposeServiceIngressClassName
+	if service.ExposeServiceIngressClassName != "" {
+		ingress.Spec.IngressClassName = &service.ExposeServiceIngressClassName
 	}
 
 	return ingress
@@ -618,10 +623,8 @@ func ConfigPorts(service kobject.ServiceConfig) []api.ContainerPort {
 		containerPort := api.ContainerPort{
 			ContainerPort: port.ContainerPort,
 			HostIP:        port.HostIP,
-		}
-		// If the default is already TCP, no need to include protocol.
-		if protocol := api.Protocol(port.Protocol); protocol != api.ProtocolTCP {
-			containerPort.Protocol = protocol
+			HostPort:      port.HostPort,
+			Protocol:      api.Protocol(port.Protocol),
 		}
 		ports = append(ports, containerPort)
 		exist[port.ID()] = true
@@ -630,6 +633,7 @@ func ConfigPorts(service kobject.ServiceConfig) []api.ContainerPort {
 	return ports
 }
 
+// ConfigLBServicePorts method configure the ports of the k8s Load Balancer Service
 func (k *Kubernetes) ConfigLBServicePorts(service kobject.ServiceConfig) ([]api.ServicePort, []api.ServicePort) {
 	var tcpPorts []api.ServicePort
 	var udpPorts []api.ServicePort
@@ -704,7 +708,7 @@ func (k *Kubernetes) ConfigServicePorts(service kobject.ServiceConfig) []api.Ser
 	return servicePorts
 }
 
-//ConfigCapabilities configure POSIX capabilities that can be added or removed to a container
+// ConfigCapabilities configure POSIX capabilities that can be added or removed to a container
 func ConfigCapabilities(service kobject.ServiceConfig) *api.Capabilities {
 	capsAdd := []api.Capability{}
 	capsDrop := []api.Capability{}
@@ -755,7 +759,7 @@ func (k *Kubernetes) ConfigTmpfs(name string, service kobject.ServiceConfig) ([]
 // In kubernetes' Secret resource, it has a data structure like a map[string]bytes, every key will act like the file name
 // when mount to a container. This is the part that missing in compose. So we will create a single key secret from compose
 // config and the key's name will be the secret's name, it's value is the file content.
-// compose'secret can only be mounted at `/run/secrets`, so we will hardcoded this.
+// compose's secret can only be mounted at `/run/secrets`, so this will be hardcoded.
 func (k *Kubernetes) ConfigSecretVolumes(name string, service kobject.ServiceConfig) ([]api.VolumeMount, []api.Volume) {
 	var volumeMounts []api.VolumeMount
 	var volumes []api.Volume
@@ -768,35 +772,11 @@ func (k *Kubernetes) ConfigSecretVolumes(name string, service kobject.ServiceCon
 				log.Warnf("Ignore gid in secrets for service: %s", name)
 			}
 
-			var itemPath string // should be the filename
-			var mountPath = ""  // should be the directory
-			// if is used the short-syntax
-			if secretConfig.Target == "" {
-				// the secret path (mountPath) should be inside the default directory /run/secrets
-				mountPath = "/run/secrets/" + secretConfig.Source
-				// the itemPath should be the source itself
-				itemPath = secretConfig.Source
+			var secretItemPath, secretMountPath, secretSubPath string
+			if k.Opt.SecretsAsFiles {
+				secretItemPath, secretMountPath, secretSubPath = k.getSecretPaths(secretConfig)
 			} else {
-				// if is the long-syntax, i should get the last part of path and consider it the filename
-				pathSplitted := strings.Split(secretConfig.Target, "/")
-				lastPart := pathSplitted[len(pathSplitted)-1]
-
-				// if the filename (lastPart) and the target is the same
-				if lastPart == secretConfig.Target {
-					// the secret path should be the source (it need to be inside a directory and only the filename was given)
-					mountPath = secretConfig.Source
-				} else {
-					// should then get the target without the filename (lastPart)
-					mountPath = mountPath + strings.TrimSuffix(secretConfig.Target, "/"+lastPart) // menos ultima parte
-				}
-
-				// if the target isn't absolute path
-				if strings.HasPrefix(secretConfig.Target, "/") == false {
-					// concat the default secret directory
-					mountPath = "/run/secrets/" + mountPath
-				}
-
-				itemPath = lastPart
+				secretItemPath, secretMountPath, secretSubPath = k.getSecretPathsLegacy(secretConfig)
 			}
 
 			volSource := api.VolumeSource{
@@ -804,7 +784,7 @@ func (k *Kubernetes) ConfigSecretVolumes(name string, service kobject.ServiceCon
 					SecretName: secretConfig.Source,
 					Items: []api.KeyToPath{{
 						Key:  secretConfig.Source,
-						Path: itemPath,
+						Path: secretItemPath,
 					}},
 				},
 			}
@@ -822,12 +802,82 @@ func (k *Kubernetes) ConfigSecretVolumes(name string, service kobject.ServiceCon
 
 			volMount := api.VolumeMount{
 				Name:      vol.Name,
-				MountPath: mountPath,
+				MountPath: secretMountPath,
+				SubPath:   secretSubPath,
 			}
 			volumeMounts = append(volumeMounts, volMount)
 		}
 	}
 	return volumeMounts, volumes
+}
+
+func (k *Kubernetes) getSecretPaths(secretConfig types.ServiceSecretConfig) (secretItemPath, secretMountPath, secretSubPath string) {
+	// Default secretConfig.Target to secretConfig.Source, just in case user was using short secret syntax or
+	// otherwise did not define a specific target
+	target := secretConfig.Target
+	if target == "" {
+		target = secretConfig.Source
+	}
+
+	// If target is an absolute path, set that as the MountPath
+	if strings.HasPrefix(secretConfig.Target, "/") {
+		secretMountPath = target
+	} else {
+		// If target is a relative path, prefix with "/run/secrets/" to replicate what docker-compose would do
+		secretMountPath = "/run/secrets/" + target
+	}
+
+	// Set subPath to the target filename. this ensures that we end up with a file at our MountPath instead
+	// of a directory with symlinks (see https://stackoverflow.com/a/68332231)
+	splitPath := strings.Split(target, "/")
+	secretFilename := splitPath[len(splitPath)-1]
+
+	// `secretItemPath` and `secretSubPath` have to be the same as `secretFilename` to ensure we create a file with
+	// that name at `secretMountPath`, instead of a directory containing a symlink to the actual file.
+	secretItemPath = secretFilename
+	secretSubPath = secretFilename
+
+	return secretItemPath, secretMountPath, secretSubPath
+}
+
+func (k *Kubernetes) getSecretPathsLegacy(secretConfig types.ServiceSecretConfig) (secretItemPath, secretMountPath, secretSubPath string) {
+	// The old way of setting secret paths. It resulted in files being placed in incorrect locations when compared to
+	// docker-compose results, but some people might depend on this behavior so this is kept here for compatibility.
+	// See https://github.com/kubernetes/kompose/issues/1280 for more details.
+
+	var itemPath string // should be the filename
+	var mountPath = ""  // should be the directory
+	// if is used the short-syntax
+	if secretConfig.Target == "" {
+		// the secret path (mountPath) should be inside the default directory /run/secrets
+		mountPath = "/run/secrets/" + secretConfig.Source
+		// the itemPath should be the source itself
+		itemPath = secretConfig.Source
+	} else {
+		// if is the long-syntax, i should get the last part of path and consider it the filename
+		pathSplitted := strings.Split(secretConfig.Target, "/")
+		lastPart := pathSplitted[len(pathSplitted)-1]
+
+		// if the filename (lastPart) and the target is the same
+		if lastPart == secretConfig.Target {
+			// the secret path should be the source (it need to be inside a directory and only the filename was given)
+			mountPath = secretConfig.Source
+		} else {
+			// should then get the target without the filename (lastPart)
+			mountPath = mountPath + strings.TrimSuffix(secretConfig.Target, "/"+lastPart) // menos ultima parte
+		}
+
+		// if the target isn't absolute path
+		if !strings.HasPrefix(secretConfig.Target, "/") {
+			// concat the default secret directory
+			mountPath = "/run/secrets/" + mountPath
+		}
+
+		itemPath = lastPart
+	}
+
+	secretSubPath = "" // We didn't set a SubPath in legacy behavior
+	return itemPath, mountPath, ""
 }
 
 // ConfigVolumes configure the container volumes.
@@ -904,16 +954,15 @@ func (k *Kubernetes) ConfigVolumes(name string, service kobject.ServiceConfig) (
 			volsource = source
 		} else if useConfigMap {
 			log.Debugf("Use configmap volume")
-
-			if cm, err := k.IntiConfigMapFromFileOrDir(name, volumeName, volume.Host, service); err != nil {
+			cm, err := k.IntiConfigMapFromFileOrDir(name, volumeName, volume.Host, service)
+			if err != nil {
 				return nil, nil, nil, nil, err
-			} else {
-				cms = append(cms, cm)
-				volsource = k.ConfigConfigMapVolumeSource(volumeName, volume.Container, cm)
+			}
+			cms = append(cms, cm)
+			volsource = k.ConfigConfigMapVolumeSource(volumeName, volume.Container, cm)
 
-				if useSubPathMount(cm) {
-					volMount.SubPath = volsource.ConfigMap.Items[0].Path
-				}
+			if useSubPathMount(cm) {
+				volMount.SubPath = volsource.ConfigMap.Items[0].Path
 			}
 		} else {
 			volsource = k.ConfigPVCVolumeSource(volumeName, readonly)
@@ -962,7 +1011,7 @@ func (k *Kubernetes) ConfigVolumes(name string, service kobject.ServiceConfig) (
 }
 
 // ConfigEmptyVolumeSource is helper function to create an EmptyDir api.VolumeSource
-//either for Tmpfs or for emptyvolumes
+// either for Tmpfs or for emptyvolumes
 func (k *Kubernetes) ConfigEmptyVolumeSource(key string) *api.VolumeSource {
 	//if key is tmpfs
 	if key == "tmpfs" {
@@ -1308,6 +1357,7 @@ func (k *Kubernetes) configKubeServiceAndIngressForService(service kobject.Servi
 		if service.ServiceType == "LoadBalancer" {
 			svcs := k.CreateLBService(name, service)
 			for _, svc := range svcs {
+				svc.Spec.ExternalTrafficPolicy = api.ServiceExternalTrafficPolicyType(service.ServiceExternalTrafficPolicy)
 				*objects = append(*objects, svc)
 			}
 			if len(svcs) > 1 {
@@ -1319,11 +1369,17 @@ func (k *Kubernetes) configKubeServiceAndIngressForService(service kobject.Servi
 			if service.ExposeService != "" {
 				*objects = append(*objects, k.initIngress(name, service, svc.Spec.Ports[0].Port))
 			}
+			if service.ServiceExternalTrafficPolicy != "" && svc.Spec.Type != api.ServiceTypeNodePort {
+				log.Warningf("External Traffic Policy is ignored for the service %v of type %v", name, service.ServiceType)
+			}
 		}
 	} else {
 		if service.ServiceType == "Headless" {
 			svc := k.CreateHeadlessService(name, service)
 			*objects = append(*objects, svc)
+			if service.ServiceExternalTrafficPolicy != "" {
+				log.Warningf("External Traffic Policy is ignored for the service %v of type Headless", name)
+			}
 		} else {
 			log.Warnf("Service %q won't be created because 'ports' is not specified", service.Name)
 		}
@@ -1422,19 +1478,15 @@ func (k *Kubernetes) Transform(komposeObject kobject.KomposeObject, opt kobject.
 					SetVolumes(volumes),
 				)
 
-				if pvc != nil {
-					// Looping on the slice pvc instead of `*objects = append(*objects, pvc...)`
-					// because the type of objects and pvc is different, but when doing append
-					// one element at a time it gets converted to runtime.Object for objects slice
-					for _, p := range pvc {
-						objects = append(objects, p)
-					}
+				// Looping on the slice pvc instead of `*objects = append(*objects, pvc...)`
+				// because the type of objects and pvc is different, but when doing append
+				// one element at a time it gets converted to runtime.Object for objects slice
+				for _, p := range pvc {
+					objects = append(objects, p)
 				}
 
-				if cms != nil {
-					for _, c := range cms {
-						objects = append(objects, c)
-					}
+				for _, c := range cms {
+					objects = append(objects, c)
 				}
 
 				podSpec.Append(
@@ -1492,17 +1544,14 @@ func (k *Kubernetes) Transform(komposeObject kobject.KomposeObject, opt kobject.
 		} else {
 			objects = k.CreateWorkloadAndConfigMapObjects(name, service, opt)
 		}
-
 		if opt.Controller == StatefulStateController {
 			service.ServiceType = "Headless"
 		}
 		k.configKubeServiceAndIngressForService(service, name, &objects)
-
 		err := k.UpdateKubernetesObjects(name, service, opt, &objects)
 		if err != nil {
 			return nil, errors.Wrap(err, "Error transforming Kubernetes objects")
 		}
-
 		if err := k.configNetworkPolicyForService(service, name, &objects); err != nil {
 			return nil, err
 		}
@@ -1513,7 +1562,6 @@ func (k *Kubernetes) Transform(komposeObject kobject.KomposeObject, opt kobject.
 	k.SortServicesFirst(&allobjects)
 	k.RemoveDupObjects(&allobjects)
 	// k.FixWorkloadVersion(&allobjects)
-
 	return allobjects, nil
 }
 

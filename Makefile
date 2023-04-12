@@ -91,15 +91,11 @@ gen-cmd:
 
 # run all validation tests
 .PHONY: validate
-validate: gofmt vet lint
+validate: gofmt vet
 
 .PHONY: vet
 vet:
 	go vet ./pkg/...
-
-.PHONY: lint
-lint:
-	golint ./pkg/...
 
 .PHONY: gofmt
 gofmt:
@@ -114,7 +110,6 @@ test: bin test-dep  validate test-unit-cover install test-cmd
 test-dep:
 	go install github.com/mattn/goveralls@latest
 	go install github.com/modocache/gover@latest
-	go install golang.org/x/lint/golint@latest
 	go install github.com/mitchellh/gox@latest
 
 

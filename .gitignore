@@ -7,6 +7,8 @@ kompose
 bin
 /docker-compose.yaml
 /docker-compose.yml
+/compose.yaml
+/compose.yml
 changes.txt
 
 # Ignore site documents / when switching branches
@@ -72,3 +74,5 @@ tags
 
 # IntelliJ IDE specific
 .idea
+
+.DS_Store

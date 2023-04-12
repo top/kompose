@@ -23,7 +23,7 @@ import (
 	"strings"
 	"testing"
 
-	dockerCliTypes "github.com/docker/cli/cli/compose/types"
+	"github.com/compose-spec/compose-go/types"
 
 	"github.com/kubernetes/kompose/pkg/kobject"
 	"github.com/kubernetes/kompose/pkg/loader/compose"
@@ -43,14 +43,15 @@ func newServiceConfig() kobject.ServiceConfig {
 		Name:            "app",
 		ContainerName:   "name",
 		Image:           "image",
-		Environment:     []kobject.EnvVar{kobject.EnvVar{Name: "env", Value: "value"}},
-		Port:            []kobject.Ports{kobject.Ports{HostPort: 123, ContainerPort: 456}, kobject.Ports{HostPort: 123, ContainerPort: 456, Protocol: string(api.ProtocolUDP)}},
+		Environment:     []kobject.EnvVar{{Name: "env", Value: "value"}},
+		Port:            []kobject.Ports{{HostPort: 123, ContainerPort: 456}, {HostPort: 123, ContainerPort: 456, Protocol: string(api.ProtocolUDP)}, {HostPort: 55564, ContainerPort: 55564}, {HostPort: 55563, ContainerPort: 55563}},
 		Command:         []string{"cmd"},
 		WorkingDir:      "dir",
 		Args:            []string{"arg1", "arg2"},
 		VolList:         []string{"/tmp/volume"},
 		Network:         []string{"network1", "network2"}, // supported
 		Labels:          nil,
+		FsGroup:         1001,
 		Annotations:     map[string]string{"abc": "def"},
 		CPUQuota:        1, // not supported
 		CapAdd:          []string{"cap_add"},
@@ -65,8 +66,8 @@ func newServiceConfig() kobject.ServiceConfig {
 		Replicas:        2,
 		Volumes:         []kobject.Volumes{{SvcName: "app", MountPath: "/tmp/volume", PVCName: "app-claim0"}},
 		GroupAdd:        []int64{1003, 1005},
-		Configs:         []dockerCliTypes.ServiceConfigObjConfig{{Source: "config", Target: "/etc/world"}},
-		ConfigsMetaData: map[string]dockerCliTypes.ConfigObjConfig{"config": dockerCliTypes.ConfigObjConfig{Name: "myconfig", File: "kubernetes_test.go"}},
+		Configs:         []types.ServiceConfigObjConfig{{Source: "config", Target: "/etc/world"}},
+		ConfigsMetaData: types.Configs{"config": types.ConfigObjConfig{Name: "myconfig", File: "kubernetes_test.go"}},
 	}
 }
 
@@ -81,6 +82,25 @@ func newSimpleServiceConfig() kobject.ServiceConfig {
 func newKomposeObject() kobject.KomposeObject {
 	return kobject.KomposeObject{
 		ServiceConfigs: map[string]kobject.ServiceConfig{"app": newServiceConfig()},
+	}
+}
+
+func newKomposeObjectHostPortProtocolConfig() kobject.ServiceConfig {
+	return kobject.ServiceConfig{
+		Name:          "nginx",
+		ContainerName: "nginx",
+		Image:         "nginx",
+		Port:          []kobject.Ports{{HostPort: 80, Protocol: string(api.ProtocolTCP), ContainerPort: 80}},
+	}
+}
+
+func newServiceConfigWithExternalTrafficPolicy() kobject.ServiceConfig {
+	loadBalancerServiceType := string(api.ServiceTypeLoadBalancer)
+	return kobject.ServiceConfig{
+		Name:                         "app",
+		Port:                         []kobject.Ports{{HostPort: 123, ContainerPort: 456}},
+		ServiceType:                  loadBalancerServiceType,
+		ServiceExternalTrafficPolicy: "local",
 	}
 }
 
@@ -189,6 +209,9 @@ func checkPodTemplate(config kobject.ServiceConfig, template api.PodTemplateSpec
 	}
 	if config.Privileged == privilegedNilOrFalse(template) {
 		return fmt.Errorf("Found different template privileged: %#v vs. %#v", config.Privileged, template.Spec.Containers[0].SecurityContext)
+	}
+	if config.FsGroup != *template.Spec.SecurityContext.FSGroup {
+		return fmt.Errorf("Found different pod security context fs group values: %#v vs. %#v", config.FsGroup, *template.Spec.SecurityContext.FSGroup)
 	}
 	if config.Stdin != template.Spec.Containers[0].Stdin {
 		return fmt.Errorf("Found different values for stdin: %#v vs. %#v", config.Stdin, template.Spec.Containers[0].Stdin)
@@ -398,8 +421,8 @@ func TestKomposeConvert(t *testing.T) {
 					if err := checkMeta(config, ds.ObjectMeta, name, true); err != nil {
 						t.Errorf("%v", err)
 					}
-					if ds.Spec.Selector != nil && len(ds.Spec.Selector.MatchLabels) > 0 {
-						t.Errorf("Expect selector be unset, got: %#v", ds.Spec.Selector)
+					if ds.Spec.Selector == nil || len(ds.Spec.Selector.MatchLabels) == 0 {
+						t.Errorf("Expect selector be set, got: %#v", ds.Spec.Selector)
 					}
 					foundDS = true
 				}
@@ -495,8 +518,8 @@ func TestKomposeConvert(t *testing.T) {
 					if (int)(dc.Spec.Replicas) != replicas {
 						t.Errorf("Expected %d replicas, got %d", replicas, dc.Spec.Replicas)
 					}
-					if len(dc.Spec.Selector) > 0 {
-						t.Errorf("Expect selector be unset, got: %#v", dc.Spec.Selector)
+					if len(dc.Spec.Selector) == 0 {
+						t.Errorf("Expect selector be set, got: %#v", dc.Spec.Selector)
 					}
 					foundDC = true
 				}
@@ -529,8 +552,8 @@ func TestConvertRestartOptions(t *testing.T) {
 		svc           kobject.KomposeObject
 		restartPolicy api.RestartPolicy
 	}{
-		"'restart' is set to 'no'":         {kobject.KomposeObject{ServiceConfigs: map[string]kobject.ServiceConfig{"app": kobject.ServiceConfig{Image: "foobar", Restart: "no"}}}, api.RestartPolicyNever},
-		"'restart' is set to 'on-failure'": {kobject.KomposeObject{ServiceConfigs: map[string]kobject.ServiceConfig{"app": kobject.ServiceConfig{Image: "foobar", Restart: "on-failure"}}}, api.RestartPolicyOnFailure},
+		"'restart' is set to 'no'":         {kobject.KomposeObject{ServiceConfigs: map[string]kobject.ServiceConfig{"app": {Image: "foobar", Restart: "no"}}}, api.RestartPolicyNever},
+		"'restart' is set to 'on-failure'": {kobject.KomposeObject{ServiceConfigs: map[string]kobject.ServiceConfig{"app": {Image: "foobar", Restart: "on-failure"}}}, api.RestartPolicyOnFailure},
 	}
 
 	for name, test := range testCases {
@@ -936,5 +959,67 @@ func TestCreatePVC(t *testing.T) {
 	}
 	if *result.Spec.StorageClassName != storageClassName {
 		t.Errorf("Expected %s returned, got %s", storageClassName, *result.Spec.StorageClassName)
+	}
+}
+
+func TestCreateHostPortAndProtocol(t *testing.T) {
+	groupName := "pod_group"
+	komposeObject := kobject.KomposeObject{
+		ServiceConfigs: map[string]kobject.ServiceConfig{"app": newKomposeObjectHostPortProtocolConfig()},
+	}
+	k := Kubernetes{}
+	objs, err := k.Transform(komposeObject, kobject.ConvertOptions{ServiceGroupMode: groupName})
+	if err != nil {
+		t.Error(errors.Wrap(err, "k.Transform failed"))
+	}
+	for _, obj := range objs {
+		if deployment, ok := obj.(*appsv1.Deployment); ok {
+			container := deployment.Spec.Template.Spec.Containers[0]
+			port := container.Ports[0]
+			containerPort := port.ContainerPort
+			hostPort := port.HostPort
+			protocol := port.Protocol
+
+			expectedPort := komposeObject.ServiceConfigs["app"].Port[0]
+			expectedContainerPort := expectedPort.ContainerPort
+			expectedHostPort := expectedPort.HostPort
+			expectedProtocol := expectedPort.Protocol
+
+			if containerPort != expectedContainerPort {
+				t.Errorf("Expected container port %v, got %v", expectedContainerPort, containerPort)
+			}
+
+			if hostPort != expectedHostPort {
+				t.Errorf("Expected host port %v, got %v", expectedHostPort, hostPort)
+			}
+
+			if protocol != api.Protocol(expectedProtocol) {
+				t.Errorf("Expected protocol %v, got %v", expectedProtocol, protocol)
+			}
+		}
+	}
+}
+
+func TestServiceExternalTrafficPolicy(t *testing.T) {
+	groupName := "pod_group"
+	komposeObject := kobject.KomposeObject{
+		ServiceConfigs: map[string]kobject.ServiceConfig{"app": newServiceConfigWithExternalTrafficPolicy()},
+	}
+	k := Kubernetes{}
+	objs, err := k.Transform(komposeObject, kobject.ConvertOptions{ServiceGroupMode: groupName})
+	if err != nil {
+		t.Error(errors.Wrap(err, "k.Transform failed"))
+	}
+	for _, obj := range objs {
+		if service, ok := obj.(*api.Service); ok {
+			serviceExternalTrafficPolicy := string(service.Spec.ExternalTrafficPolicy)
+			if serviceExternalTrafficPolicy != strings.ToLower(string(api.ServiceExternalTrafficPolicyTypeLocal)) {
+				t.Errorf("Expected Local as external lifecycle policy, got %v", serviceExternalTrafficPolicy)
+			}
+			serviceType := service.Spec.Type
+			if serviceType != api.ServiceTypeLoadBalancer {
+				t.Errorf("Expected LoadBalancer as service type, got %v", serviceType)
+			}
+		}
 	}
 }

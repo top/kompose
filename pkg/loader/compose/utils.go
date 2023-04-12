@@ -17,7 +17,7 @@ limitations under the License.
 package compose
 
 import (
-	"io/ioutil"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -32,6 +32,8 @@ import (
 const (
 	// LabelServiceType defines the type of service to be created
 	LabelServiceType = "kompose.service.type"
+	// LabelServiceExternalTrafficPolicy defines the external policy traffic of service to be created
+	LabelServiceExternalTrafficPolicy = "kompose.service.external-traffic-policy"
 	// LabelServiceGroup defines the group of services in a single pod
 	LabelServiceGroup = "kompose.service.group"
 	// LabelNodePortPort defines the port value for NodePort service
@@ -77,6 +79,8 @@ const (
 
 	// ServiceTypeHeadless ...
 	ServiceTypeHeadless = "Headless"
+	// LabelSecurityContextFsGroup defines the pod FsGroup
+	LabelSecurityContextFsGroup = "kompose.security-context.fsgroup"
 )
 
 // load environment variables from compose file
@@ -151,6 +155,17 @@ func handleServiceType(ServiceType string) (string, error) {
 	}
 }
 
+func handleServiceExternalTrafficPolicy(ServiceExternalTrafficPolicyType string) (string, error) {
+	switch strings.ToLower(ServiceExternalTrafficPolicyType) {
+	case "", "cluster":
+		return string(api.ServiceExternalTrafficPolicyTypeCluster), nil
+	case "local":
+		return string(api.ServiceExternalTrafficPolicyTypeLocal), nil
+	default:
+		return "", errors.New("Unknown value " + ServiceExternalTrafficPolicyType + " , supported values are 'local, cluster'")
+	}
+}
+
 func normalizeContainerNames(svcName string) string {
 	return strings.ToLower(svcName)
 }
@@ -179,11 +194,11 @@ func normalizeNetworkNames(netName string) (string, error) {
 func ReadFile(fileName string) ([]byte, error) {
 	if fileName == "-" {
 		if StdinData == nil {
-			data, err := ioutil.ReadAll(os.Stdin)
+			data, err := io.ReadAll(os.Stdin)
 			StdinData = data
 			return data, err
 		}
 		return StdinData, nil
 	}
-	return ioutil.ReadFile(fileName)
+	return os.ReadFile(fileName)
 }

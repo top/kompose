@@ -79,7 +79,7 @@ func (o *OpenShift) initImageStream(name string, service kobject.ServiceConfig, 
 	is := &imageapi.ImageStream{
 		TypeMeta: kapi.TypeMeta{
 			Kind:       "ImageStream",
-			APIVersion: "v1",
+			APIVersion: "image.openshift.io/v1",
 		},
 		ObjectMeta: kapi.ObjectMeta{
 			Name:   name,
@@ -172,7 +172,7 @@ func (o *OpenShift) initDeploymentConfig(name string, service kobject.ServiceCon
 	dc := &deployapi.DeploymentConfig{
 		TypeMeta: kapi.TypeMeta{
 			Kind:       "DeploymentConfig",
-			APIVersion: "v1",
+			APIVersion: "apps.openshift.io/v1",
 		},
 		ObjectMeta: kapi.ObjectMeta{
 			Name:   name,
@@ -190,10 +190,10 @@ func (o *OpenShift) initDeploymentConfig(name string, service kobject.ServiceCon
 			},
 			Triggers: []deployapi.DeploymentTriggerPolicy{
 				// Trigger new deploy when DeploymentConfig is created (config change)
-				deployapi.DeploymentTriggerPolicy{
+				{
 					Type: deployapi.DeploymentTriggerOnConfigChange,
 				},
-				deployapi.DeploymentTriggerPolicy{
+				{
 					Type: deployapi.DeploymentTriggerOnImageChange,
 					ImageChangeParams: &deployapi.DeploymentTriggerImageChangeParams{
 						//Automatic - if new tag is detected - update image update inside the pod template
@@ -386,6 +386,7 @@ func (o *OpenShift) Transform(komposeObject kobject.KomposeObject, opt kobject.C
 			if service.ServiceType == "LoadBalancer" {
 				svcs := o.CreateLBService(name, service)
 				for _, svc := range svcs {
+					svc.Spec.ExternalTrafficPolicy = corev1.ServiceExternalTrafficPolicyType(service.ServiceExternalTrafficPolicy)
 					objects = append(objects, svc)
 				}
 				if len(svcs) > 1 {
@@ -398,10 +399,16 @@ func (o *OpenShift) Transform(komposeObject kobject.KomposeObject, opt kobject.C
 				if service.ExposeService != "" {
 					objects = append(objects, o.initRoute(name, service, svc.Spec.Ports[0].Port))
 				}
+				if service.ServiceExternalTrafficPolicy != "" && svc.Spec.Type != corev1.ServiceTypeNodePort {
+					log.Warningf("External Traffic Policy is ignored for the service %v of type %v", name, service.ServiceType)
+				}
 			}
 		} else if service.ServiceType == "Headless" {
 			svc := o.CreateHeadlessService(name, service)
 			objects = append(objects, svc)
+			if service.ServiceExternalTrafficPolicy != "" {
+				log.Warningf("External Traffic Policy is ignored for the service %v of type Headless", name)
+			}
 		}
 
 		err := o.UpdateKubernetesObjects(name, service, opt, &objects)
