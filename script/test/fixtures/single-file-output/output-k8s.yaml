@@ -2,10 +2,6 @@
 apiVersion: v1
 kind: Service
 metadata:
-  annotations:
-    kompose.service.expose: lb
-    kompose.service.expose.ingress-class-name: nginx
-  creationTimestamp: null
   labels:
     io.kompose.service: front-end
   name: front_end
@@ -16,17 +12,11 @@ spec:
       targetPort: 80
   selector:
     io.kompose.service: front-end
-status:
-  loadBalancer: {}
 
 ---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  annotations:
-    kompose.service.expose: lb
-    kompose.service.expose.ingress-class-name: nginx
-  creationTimestamp: null
   labels:
     io.kompose.service: front-end
   name: front-end
@@ -35,15 +25,9 @@ spec:
   selector:
     matchLabels:
       io.kompose.service: front-end
-  strategy: {}
   template:
     metadata:
-      annotations:
-        kompose.service.expose: lb
-        kompose.service.expose.ingress-class-name: nginx
-      creationTimestamp: null
       labels:
-        io.kompose.network/single-file-output-default: "true"
         io.kompose.service: front-end
     spec:
       containers:
@@ -54,20 +38,13 @@ spec:
           name: front-end
           ports:
             - containerPort: 80
-              hostPort: 80
               protocol: TCP
-          resources: {}
       restartPolicy: Always
-status: {}
 
 ---
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
-  annotations:
-    kompose.service.expose: lb
-    kompose.service.expose.ingress-class-name: nginx
-  creationTimestamp: null
   labels:
     io.kompose.service: front-end
   name: front-end
@@ -84,22 +61,4 @@ spec:
                   number: 80
             path: /
             pathType: Prefix
-status:
-  loadBalancer: {}
-
----
-apiVersion: networking.k8s.io/v1
-kind: NetworkPolicy
-metadata:
-  creationTimestamp: null
-  name: single-file-output-default
-spec:
-  ingress:
-    - from:
-        - podSelector:
-            matchLabels:
-              io.kompose.network/single-file-output-default: "true"
-  podSelector:
-    matchLabels:
-      io.kompose.network/single-file-output-default: "true"
 

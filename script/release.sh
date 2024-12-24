@@ -56,9 +56,9 @@ init_sync() {
     exit 0
   fi
 
-  git checkout master
+  git checkout main
   git fetch upstream
-  git merge upstream/master
+  git merge upstream/main
   git checkout -b release-$1
 }
 
@@ -108,7 +108,7 @@ git_commit() {
   gh pr create
 
   echo ""
-  echo "PR opened against master to update version"
+  echo "PR opened against main to update version"
   echo "MERGE THIS BEFORE CONTINUING"
   echo ""
 }
@@ -119,8 +119,8 @@ git_pull() {
 
 
 git_sync() {
-  git fetch upstream master
-  git rebase upstream/master
+  git fetch upstream main
+  git rebase upstream/main
 }
 
 generate_install_guide() {
@@ -133,8 +133,14 @@ __Linux and macOS:__
 # Linux
 curl -L https://github.com/kubernetes/kompose/releases/download/v$1/kompose-linux-amd64 -o kompose
 
+# Linux ARM64
+curl -L https://github.com/kubernetes/kompose/releases/download/v$1/kompose-linux-arm64 -o kompose
+
 # macOS
 curl -L https://github.com/kubernetes/kompose/releases/download/v$1/kompose-darwin-amd64 -o kompose
+
+# macOS ARM64
+curl -L https://github.com/kubernetes/kompose/releases/download/v$1/kompose-darwin-arm64 -o kompose
 
 chmod +x kompose
 sudo mv ./kompose /usr/local/bin/kompose
@@ -223,6 +229,7 @@ main() {
   "Create tarballs"
   "Generate install guide"
   "Upload the binaries and push to GitHub release page"
+  "Update the website"
   "Clean"
   "Quit")
   select opt in "${options[@]}"
@@ -252,6 +259,11 @@ main() {
               ;;
           "Upload the binaries and push to GitHub release page")
               push $VERSION
+              ;;
+          "Update the website")
+              echo "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+              echo "Run ./script/manual-docs-sync.sh on the main branch"
+              echo "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
               ;;
           "Clean")
               clean $VERSION

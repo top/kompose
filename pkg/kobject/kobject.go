@@ -21,11 +21,12 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/compose-spec/compose-go/types"
+	"github.com/compose-spec/compose-go/v2/types"
 	deployapi "github.com/openshift/api/apps/v1"
 	"github.com/pkg/errors"
 	"github.com/spf13/cast"
 	v1 "k8s.io/api/apps/v1"
+	batchv1 "k8s.io/api/batch/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 )
 
@@ -38,6 +39,9 @@ type KomposeObject struct {
 	LoadedFrom string
 
 	Secrets types.Secrets
+
+	// Namespace is the namespace where all the generated objects would be assigned to
+	Namespace string
 }
 
 // ConvertOptions holds all options that controls transformation process
@@ -50,6 +54,7 @@ type ConvertOptions struct {
 	BuildRepo                   string
 	BuildBranch                 string
 	Build                       string
+	Profiles                    []string
 	PushImage                   bool
 	PushImageRegistry           string
 	CreateChart                 bool
@@ -73,16 +78,20 @@ type ConvertOptions struct {
 	IsDeploymentConfigFlag      bool
 	IsNamespaceFlag             bool
 
+	BuildCommand string
+	PushCommand  string
+
 	Server string
 
 	YAMLIndent int
 
 	WithKomposeAnnotation bool
 
-	MultipleContainerMode bool
-	ServiceGroupMode      string
-	ServiceGroupName      string
-	SecretsAsFiles        bool
+	MultipleContainerMode   bool
+	ServiceGroupMode        string
+	ServiceGroupName        string
+	SecretsAsFiles          bool
+	GenerateNetworkPolicies bool
 }
 
 // IsPodController indicate if the user want to use a controller
@@ -106,8 +115,10 @@ type ServiceConfig struct {
 	WorkingDir                    string             `compose:""`
 	DomainName                    string             `compose:"domainname"`
 	HostName                      string             `compose:"hostname"`
+	ReadOnly                      bool               `compose:"read_only"`
 	Args                          []string           `compose:"args"`
 	VolList                       []string           `compose:"volumes"`
+	NetworkMode                   string             `compose:"network_mode"`
 	Network                       []string           `compose:"network"`
 	Labels                        map[string]string  `compose:"labels"`
 	Annotations                   map[string]string  `compose:""`
@@ -131,9 +142,11 @@ type ServiceConfig struct {
 	StopGracePeriod               string             `compose:"stop_grace_period"`
 	Build                         string             `compose:"build"`
 	BuildArgs                     map[string]*string `compose:"build-args"`
+	ExposeContainerToHost         bool               `compose:"kompose.controller.port.expose"`
 	ExposeService                 string             `compose:"kompose.service.expose"`
 	ExposeServicePath             string             `compose:"kompose.service.expose.path"`
 	BuildLabels                   map[string]string  `compose:"build-labels"`
+	BuildTarget                   string             `compose:""`
 	ExposeServiceTLS              string             `compose:"kompose.service.expose.tls-secret"`
 	ExposeServiceIngressClassName string             `compose:"kompose.service.expose.ingress-class-name"`
 	ImagePullSecret               string             `compose:"kompose.image-pull-secret"`
@@ -142,18 +155,22 @@ type ServiceConfig struct {
 	MemLimit                      types.UnitBytes    `compose:"mem_limit"`
 	MemReservation                types.UnitBytes    `compose:""`
 	DeployMode                    string             `compose:""`
+	VolumeMountSubPath            string             `compose:"kompose.volume.subpath"`
 	// DeployLabels mapping to kubernetes labels
-	DeployLabels       map[string]string  `compose:""`
-	DeployUpdateConfig types.UpdateConfig `compose:""`
-	TmpFs              []string           `compose:"tmpfs"`
-	Dockerfile         string             `compose:"dockerfile"`
-	Replicas           int                `compose:"replicas"`
-	GroupAdd           []int64            `compose:"group_add"`
-	FsGroup            int64              `compose:"kompose.security-context.fsgroup"`
-	Volumes            []Volumes          `compose:""`
-	Secrets            []types.ServiceSecretConfig
-	HealthChecks       HealthChecks `compose:""`
-	Placement          Placement    `compose:""`
+	DeployLabels             map[string]string         `compose:""`
+	DeployUpdateConfig       types.UpdateConfig        `compose:""`
+	TmpFs                    []string                  `compose:"tmpfs"`
+	Dockerfile               string                    `compose:"dockerfile"`
+	Replicas                 int                       `compose:"replicas"`
+	GroupAdd                 []int64                   `compose:"group_add"`
+	FsGroup                  int64                     `compose:"kompose.security-context.fsgroup"`
+	CronJobSchedule          string                    `compose:"kompose.cronjob.schedule"`
+	CronJobConcurrencyPolicy batchv1.ConcurrencyPolicy `compose:"kompose.cronjob.concurrency_policy"`
+	CronJobBackoffLimit      *int32                    `compose:"kompose.cronjob.backoff_limit"`
+	Volumes                  []Volumes                 `compose:""`
+	Secrets                  []types.ServiceSecretConfig
+	HealthChecks             HealthChecks `compose:""`
+	Placement                Placement    `compose:""`
 	//This is for long LONG SYNTAX link(https://docs.docker.com/compose/compose-file/#long-syntax)
 	Configs []types.ServiceConfigObjConfig `compose:""`
 	//This is for SHORT SYNTAX link(https://docs.docker.com/compose/compose-file/#configs)
@@ -236,11 +253,28 @@ func (s *ServiceConfig) GetConfigMapKeyFromMeta(name string) (string, error) {
 	}
 
 	config := s.ConfigsMetaData[name]
-	if config.External.External {
+	if config.External {
 		return "", errors.Errorf("config %s is external", name)
 	}
 
-	return filepath.Base(config.File), nil
+	if config.File != "" {
+		return filepath.Base(config.File), nil
+	} else if config.Content != "" {
+		// loop through s.Configs to find the config with the same name
+		for _, cfg := range s.Configs {
+			if cfg.Source == name {
+				if cfg.Target == "" {
+					return filepath.Base(cfg.Source), nil
+				} else {
+					return filepath.Base(cfg.Target), nil
+				}
+			}
+		}
+	} else {
+		return "", errors.Errorf("config %s is empty", name)
+	}
+
+	return "", errors.Errorf("config %s not found", name)
 }
 
 // GetKubernetesUpdateStrategy from compose update_config

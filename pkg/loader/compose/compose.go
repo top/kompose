@@ -17,6 +17,7 @@ limitations under the License.
 package compose
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"reflect"
@@ -24,8 +25,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/compose-spec/compose-go/cli"
-	"github.com/compose-spec/compose-go/types"
+	"github.com/compose-spec/compose-go/v2/cli"
+	"github.com/compose-spec/compose-go/v2/types"
 	"github.com/fatih/structs"
 	"github.com/google/shlex"
 	"github.com/kubernetes/kompose/pkg/kobject"
@@ -33,6 +34,7 @@ import (
 	"github.com/pkg/errors"
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/cast"
+	batchv1 "k8s.io/api/batch/v1"
 	api "k8s.io/api/core/v1"
 )
 
@@ -149,21 +151,34 @@ func checkUnsupportedKey(composeProject *types.Project) []string {
 }
 
 // LoadFile loads a compose file into KomposeObject
-func (c *Compose) LoadFile(files []string) (kobject.KomposeObject, error) {
+func (c *Compose) LoadFile(files []string, profiles []string) (kobject.KomposeObject, error) {
 	// Gather the working directory
-	workingDir, err := getComposeFileDir(files)
+	workingDir, err := transformer.GetComposeFileDir(files)
 	if err != nil {
 		return kobject.KomposeObject{}, err
 	}
 
-	projectOptions, err := cli.NewProjectOptions(files, cli.WithOsEnv, cli.WithWorkingDirectory(workingDir), cli.WithInterpolation(false))
+	projectOptions, err := cli.NewProjectOptions(
+		files, cli.WithOsEnv,
+		cli.WithWorkingDirectory(workingDir),
+		cli.WithInterpolation(true),
+		cli.WithProfiles(profiles),
+	)
 	if err != nil {
 		return kobject.KomposeObject{}, errors.Wrap(err, "Unable to create compose options")
 	}
 
-	project, err := cli.ProjectFromOptions(projectOptions)
+	project, err := cli.ProjectFromOptions(context.Background(), projectOptions)
 	if err != nil {
 		return kobject.KomposeObject{}, errors.Wrap(err, "Unable to load files")
+	}
+
+	// Finding 0 services means two things:
+	// 1. The compose project is empty
+	// 2. The profile that is configured in the compose project is different than the one defined in Kompose convert options
+	// In both cases we should provide the user with a warning indicating that we didn't find any service.
+	if len(project.Services) == 0 {
+		log.Warning("No service selected. The profile specified in services of your compose yaml may not exist.")
 	}
 
 	komposeObject, err := dockerComposeToKomposeMapping(project)
@@ -235,7 +250,7 @@ func convertDockerLabel(dockerLabel string) (string, error) {
 	return "", errors.New(errMsg)
 }
 
-// Convert the Docker Compose volumes to []string (the old way)
+// Convert the Compose volumes to []string (the old way)
 // TODO: Check to see if it's a "bind" or "volume". Ignore for now.
 // TODO: Refactor it similar to loadPorts
 // See: https://docs.docker.com/compose/compose-file/#long-syntax-3
@@ -258,7 +273,7 @@ func loadVolumes(volumes []types.ServiceVolumeConfig) []string {
 	return volArray
 }
 
-// Convert Docker Compose ports to kobject.Ports
+// Convert Compose ports to kobject.Ports
 // expose ports will be treated as TCP ports
 func loadPorts(ports []types.ServicePortConfig, expose []string) []kobject.Ports {
 	komposePorts := []kobject.Ports{}
@@ -288,7 +303,6 @@ func loadPorts(ports []types.ServicePortConfig, expose []string) []kobject.Ports
 			continue
 		}
 		komposePorts = append(komposePorts, kobject.Ports{
-			HostPort:      cast.ToInt32(portValue),
 			ContainerPort: cast.ToInt32(portValue),
 			HostIP:        "",
 			Protocol:      strings.ToUpper(protocol),
@@ -451,7 +465,7 @@ func dockerComposeToKomposeMapping(composeObject *types.Project) (kobject.Kompos
 	for _, composeServiceConfig := range composeObject.Services {
 		// Standard import
 		// No need to modify before importation
-		name := composeServiceConfig.Name
+		name := parseResourceName(composeServiceConfig.Name, composeServiceConfig.Labels)
 		serviceConfig := kobject.ServiceConfig{}
 		serviceConfig.Name = name
 		serviceConfig.Image = composeServiceConfig.Image
@@ -462,6 +476,7 @@ func dockerComposeToKomposeMapping(composeObject *types.Project) (kobject.Kompos
 		serviceConfig.Expose = composeServiceConfig.Expose
 		serviceConfig.Privileged = composeServiceConfig.Privileged
 		serviceConfig.User = composeServiceConfig.User
+		serviceConfig.ReadOnly = composeServiceConfig.ReadOnly
 		serviceConfig.Stdin = composeServiceConfig.StdinOpen
 		serviceConfig.Tty = composeServiceConfig.Tty
 		serviceConfig.TmpFs = composeServiceConfig.Tmpfs
@@ -472,6 +487,7 @@ func dockerComposeToKomposeMapping(composeObject *types.Project) (kobject.Kompos
 		serviceConfig.HostName = composeServiceConfig.Hostname
 		serviceConfig.DomainName = composeServiceConfig.DomainName
 		serviceConfig.Secrets = composeServiceConfig.Secrets
+		serviceConfig.NetworkMode = composeServiceConfig.NetworkMode
 
 		if composeServiceConfig.StopGracePeriod != nil {
 			serviceConfig.StopGracePeriod = composeServiceConfig.StopGracePeriod.String()
@@ -545,13 +561,14 @@ func dockerComposeToKomposeMapping(composeObject *types.Project) (kobject.Kompos
 			serviceConfig.Dockerfile = composeServiceConfig.Build.Dockerfile
 			serviceConfig.BuildArgs = composeServiceConfig.Build.Args
 			serviceConfig.BuildLabels = composeServiceConfig.Build.Labels
+			serviceConfig.BuildTarget = composeServiceConfig.Build.Target
 		}
 
 		// env
 		parseEnvironment(&composeServiceConfig, &serviceConfig)
 
 		// Get env_file
-		serviceConfig.EnvFile = composeServiceConfig.EnvFile
+		parseEnvFiles(&composeServiceConfig, &serviceConfig)
 
 		// Parse the ports
 		// v3 uses a new format called "long syntax" starting in 3.2
@@ -636,23 +653,15 @@ func parseResources(composeServiceConfig *types.ServiceConfig, serviceConfig *ko
 		if composeServiceConfig.Deploy.Resources.Limits != nil {
 			serviceConfig.MemLimit = composeServiceConfig.Deploy.Resources.Limits.MemoryBytes
 
-			if composeServiceConfig.Deploy.Resources.Limits.NanoCPUs != "" {
-				cpuLimit, err := strconv.ParseFloat(composeServiceConfig.Deploy.Resources.Limits.NanoCPUs, 64)
-				if err != nil {
-					return errors.Wrap(err, "Unable to convert cpu limits resources value")
-				}
-				serviceConfig.CPULimit = int64(cpuLimit * 1000)
+			if composeServiceConfig.Deploy.Resources.Limits.NanoCPUs > 0 {
+				serviceConfig.CPULimit = int64(composeServiceConfig.Deploy.Resources.Limits.NanoCPUs * 1000)
 			}
 		}
 		if composeServiceConfig.Deploy.Resources.Reservations != nil {
 			serviceConfig.MemReservation = composeServiceConfig.Deploy.Resources.Reservations.MemoryBytes
 
-			if composeServiceConfig.Deploy.Resources.Reservations.NanoCPUs != "" {
-				cpuReservation, err := strconv.ParseFloat(composeServiceConfig.Deploy.Resources.Reservations.NanoCPUs, 64)
-				if err != nil {
-					return errors.Wrap(err, "Unable to convert cpu limits reservation value")
-				}
-				serviceConfig.CPUReservation = int64(cpuReservation * 1000)
+			if composeServiceConfig.Deploy.Resources.Reservations.NanoCPUs > 0 {
+				serviceConfig.CPUReservation = int64(composeServiceConfig.Deploy.Resources.Reservations.NanoCPUs * 1000)
 			}
 		}
 	}
@@ -678,6 +687,49 @@ func parseEnvironment(composeServiceConfig *types.ServiceConfig, serviceConfig *
 		}
 		serviceConfig.Environment = append(serviceConfig.Environment, env)
 	}
+}
+
+func parseEnvFiles(composeServiceConfig *types.ServiceConfig, serviceConfig *kobject.ServiceConfig) {
+	for _, value := range composeServiceConfig.EnvFiles {
+		serviceConfig.EnvFile = append(serviceConfig.EnvFile, value.Path)
+		// value.Required is ignored
+	}
+}
+
+func handleCronJobConcurrencyPolicy(policy string) (batchv1.ConcurrencyPolicy, error) {
+	switch policy {
+	case "Allow":
+		return batchv1.AllowConcurrent, nil
+	case "Forbid":
+		return batchv1.ForbidConcurrent, nil
+	case "Replace":
+		return batchv1.ReplaceConcurrent, nil
+	case "":
+		return "", nil
+	default:
+		return "", fmt.Errorf("invalid cronjob concurrency policy: %s", policy)
+	}
+}
+
+func handleCronJobBackoffLimit(backoffLimit string) (*int32, error) {
+	if backoffLimit == "" {
+		return nil, nil
+	}
+
+	limit, err := cast.ToInt32E(backoffLimit)
+	if err != nil {
+		return nil, fmt.Errorf("invalid cronjob backoff limit: %s", backoffLimit)
+	}
+	return &limit, nil
+}
+
+func handleCronJobSchedule(schedule string) (string, error) {
+	if schedule == "" {
+		return "", fmt.Errorf("cronjob schedule cannot be empty")
+	}
+
+	return schedule, nil
+
 }
 
 // parseKomposeLabels parse kompose labels, also do some validation
@@ -707,8 +759,10 @@ func parseKomposeLabels(labels map[string]string, serviceConfig *kobject.Service
 			serviceConfig.ServiceExternalTrafficPolicy = serviceExternalTypeTrafficPolicy
 		case LabelSecurityContextFsGroup:
 			serviceConfig.FsGroup = cast.ToInt64(value)
+		case LabelExposeContainerToHost:
+			serviceConfig.ExposeContainerToHost = cast.ToBool(value)
 		case LabelServiceExpose:
-			serviceConfig.ExposeService = strings.Trim(strings.ToLower(value), " ,")
+			serviceConfig.ExposeService = strings.Trim(value, " ,")
 		case LabelNodePortPort:
 			serviceConfig.NodePortPort = cast.ToInt32(value)
 		case LabelServiceExposeTLSSecret:
@@ -719,6 +773,33 @@ func parseKomposeLabels(labels map[string]string, serviceConfig *kobject.Service
 			serviceConfig.ImagePullSecret = value
 		case LabelImagePullPolicy:
 			serviceConfig.ImagePullPolicy = value
+		case LabelContainerVolumeSubpath:
+			serviceConfig.VolumeMountSubPath = value
+		case LabelCronJobSchedule:
+			cronJobSchedule, err := handleCronJobSchedule(value)
+			if err != nil {
+				return errors.Wrap(err, "handleCronJobSchedule failed")
+			}
+
+			serviceConfig.CronJobSchedule = cronJobSchedule
+		case LabelCronJobConcurrencyPolicy:
+			cronJobConcurrencyPolicy, err := handleCronJobConcurrencyPolicy(value)
+			if err != nil {
+				return errors.Wrap(err, "handleCronJobConcurrencyPolicy failed")
+			}
+
+			serviceConfig.CronJobConcurrencyPolicy = cronJobConcurrencyPolicy
+		case LabelCronJobBackoffLimit:
+			cronJobBackoffLimit, err := handleCronJobBackoffLimit(value)
+			if err != nil {
+				return errors.Wrap(err, "handleCronJobBackoffLimit failed")
+			}
+
+			serviceConfig.CronJobBackoffLimit = cronJobBackoffLimit
+		case LabelNameOverride:
+			// generate a valid k8s resource name
+			normalizedName := normalizeServiceNames(value)
+			serviceConfig.Name = normalizedName
 		default:
 			serviceConfig.Labels[key] = value
 		}
@@ -738,6 +819,11 @@ func parseKomposeLabels(labels map[string]string, serviceConfig *kobject.Service
 
 	if len(serviceConfig.Port) > 1 && serviceConfig.NodePortPort != 0 {
 		return errors.New("cannot set kompose.service.nodeport.port when service has multiple ports")
+	}
+
+	if serviceConfig.Restart == "always" && serviceConfig.CronJobConcurrencyPolicy != "" {
+		log.Infof("cronjob restart policy will be converted from '%s' to 'on-failure'", serviceConfig.Restart)
+		serviceConfig.Restart = "on-failure"
 	}
 
 	return nil

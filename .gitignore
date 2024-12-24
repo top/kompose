@@ -76,3 +76,12 @@ tags
 .idea
 
 .DS_Store
+
+# VSCode specific
+.vscode
+
+# Client Test generated files
+client/testdata/generated
+
+
+pkg/mod

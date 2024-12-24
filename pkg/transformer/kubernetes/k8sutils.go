@@ -31,6 +31,7 @@ import (
 	"text/template"
 	"time"
 
+	"github.com/compose-spec/compose-go/v2/types"
 	"github.com/joho/godotenv"
 	"github.com/kubernetes/kompose/pkg/kobject"
 	"github.com/kubernetes/kompose/pkg/loader/compose"
@@ -40,12 +41,45 @@ import (
 	log "github.com/sirupsen/logrus"
 	"gopkg.in/yaml.v3"
 	appsv1 "k8s.io/api/apps/v1"
+	hpa "k8s.io/api/autoscaling/v2beta2"
 	api "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 )
+
+// Default values for Horizontal Pod Autoscaler (HPA)
+const (
+	DefaultMinReplicas       = 1
+	DefaultMaxReplicas       = 3
+	DefaultCPUUtilization    = 50
+	DefaultMemoryUtilization = 70
+)
+
+// LabelKeys are the keys for HPA related labels in the service
+var LabelKeys = []string{
+	compose.LabelHpaCPU,
+	compose.LabelHpaMemory,
+	compose.LabelHpaMinReplicas,
+	compose.LabelHpaMaxReplicas,
+}
+
+type HpaValues struct {
+	MinReplicas       int32
+	MaxReplicas       int32
+	CPUtilization     int32
+	MemoryUtilization int32
+}
+
+const (
+	NetworkModeService = "service:"
+)
+
+type DeploymentMapping struct {
+	SourceDeploymentName string
+	TargetDeploymentName string
+}
 
 /**
  * Generate Helm Chart configuration
@@ -280,6 +314,46 @@ func marshal(obj runtime.Object, jsonFormat bool, indent int) (data []byte, err 
 	return
 }
 
+// remove empty map[string]interface{} strings from the object
+//
+// Note: this function uses recursion, use it only objects created by the unmarshalled json.
+// Passing cyclic structures to removeEmptyInterfaces will result in a stack overflow.
+func removeEmptyInterfaces(obj interface{}) interface{} {
+	switch v := obj.(type) {
+	case []interface{}:
+		for i, val := range v {
+			if valMap, ok := val.(map[string]interface{}); (ok && len(valMap) == 0) || val == nil {
+				v = append(v[:i], v[i+1:]...)
+			} else {
+				v[i] = removeEmptyInterfaces(val)
+			}
+		}
+		return v
+	case map[string]interface{}:
+		for k, val := range v {
+			if valMap, ok := val.(map[string]interface{}); ok {
+				// It is always map[string]interface{} when passed the map[string]interface{}
+				valMap := removeEmptyInterfaces(valMap).(map[string]interface{})
+				if len(valMap) == 0 {
+					delete(v, k)
+				}
+			} else if val == nil {
+				delete(v, k)
+			} else {
+				processedInterface := removeEmptyInterfaces(val)
+				if valSlice, ok := processedInterface.([]interface{}); ok && len(valSlice) == 0 {
+					delete(v, k)
+				} else {
+					v[k] = processedInterface
+				}
+			}
+		}
+		return v
+	default:
+		return v
+	}
+}
+
 // Convert JSON to YAML.
 func jsonToYaml(j []byte, spaces int) ([]byte, error) {
 	// Convert the JSON to an object.
@@ -293,7 +367,7 @@ func jsonToYaml(j []byte, spaces int) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-
+	jsonObj = removeEmptyInterfaces(jsonObj)
 	var b bytes.Buffer
 	encoder := yaml.NewEncoder(&b)
 	encoder.SetIndent(spaces)
@@ -429,13 +503,20 @@ func (k *Kubernetes) CreateHeadlessService(name string, service kobject.ServiceC
 }
 
 // UpdateKubernetesObjectsMultipleContainers method updates the kubernetes objects with the necessary data
-func (k *Kubernetes) UpdateKubernetesObjectsMultipleContainers(name string, service kobject.ServiceConfig, objects *[]runtime.Object, podSpec PodSpec) error {
+func (k *Kubernetes) UpdateKubernetesObjectsMultipleContainers(name string, service kobject.ServiceConfig, objects *[]runtime.Object, podSpec PodSpec, opt kobject.ConvertOptions) error {
 	// Configure annotations
 	annotations := transformer.ConfigAnnotations(service)
 
 	// fillTemplate fills the pod template with the value calculated from config
 	fillTemplate := func(template *api.PodTemplateSpec) error {
-		template.ObjectMeta.Labels = transformer.ConfigLabelsWithNetwork(name, service.Network)
+
+		// We will ONLY add config labels with network if we actually
+		// passed in --generate-network-policies to the kompose command
+		if opt.GenerateNetworkPolicies {
+			template.ObjectMeta.Labels = transformer.ConfigLabelsWithNetwork(name, service.Network)
+		} else {
+			template.ObjectMeta.Labels = transformer.ConfigLabels(name)
+		}
 		template.Spec = podSpec.Get()
 		return nil
 	}
@@ -560,17 +641,41 @@ func (k *Kubernetes) UpdateKubernetesObjects(name string, service kobject.Servic
 			securityContext.Privileged = &service.Privileged
 		}
 		if service.User != "" {
-			uid, err := strconv.ParseInt(service.User, 10, 64)
-			if err != nil {
-				log.Warn("Ignoring user directive. User to be specified as a UID (numeric).")
-			} else {
-				securityContext.RunAsUser = &uid
+			switch userparts := strings.Split(service.User, ":"); len(userparts) {
+			default:
+				log.Warn("Ignoring ill-formed user directive. Must be in format UID or UID:GID.")
+			case 1:
+				uid, err := strconv.ParseInt(userparts[0], 10, 64)
+				if err != nil {
+					log.Warn("Ignoring user directive. User to be specified as a UID (numeric).")
+				} else {
+					securityContext.RunAsUser = &uid
+				}
+			case 2:
+				uid, err := strconv.ParseInt(userparts[0], 10, 64)
+				if err != nil {
+					log.Warn("Ignoring user name in user directive. User to be specified as a UID (numeric).")
+				} else {
+					securityContext.RunAsUser = &uid
+				}
+
+				gid, err := strconv.ParseInt(userparts[1], 10, 64)
+				if err != nil {
+					log.Warn("Ignoring group name in user directive. Group to be specified as a GID (numeric).")
+				} else {
+					securityContext.RunAsGroup = &gid
+				}
 			}
 		}
 
 		//set capabilities if it is not empty
 		if len(capabilities.Add) > 0 || len(capabilities.Drop) > 0 {
 			securityContext.Capabilities = capabilities
+		}
+
+		//set readOnlyRootFilesystem if it is enabled
+		if service.ReadOnly {
+			securityContext.ReadOnlyRootFilesystem = &service.ReadOnly
 		}
 
 		// update template only if securityContext is not empty
@@ -581,7 +686,13 @@ func (k *Kubernetes) UpdateKubernetesObjects(name string, service kobject.Servic
 			template.Spec.SecurityContext = podSecurityContext
 		}
 		template.Spec.Containers[0].Ports = ports
-		template.ObjectMeta.Labels = transformer.ConfigLabelsWithNetwork(name, service.Network)
+
+		// Only add network mode if generate-network-policies is set
+		if opt.GenerateNetworkPolicies {
+			template.ObjectMeta.Labels = transformer.ConfigLabelsWithNetwork(name, service.Network)
+		} else {
+			template.ObjectMeta.Labels = transformer.ConfigLabels(name)
+		}
 
 		// Configure the image pull policy
 		policy, err := GetImagePullPolicy(name, service.ImagePullPolicy)
@@ -608,7 +719,7 @@ func (k *Kubernetes) UpdateKubernetesObjects(name string, service kobject.Servic
 		if serviceAccountName, ok := service.Labels[compose.LabelServiceAccountName]; ok {
 			template.Spec.ServiceAccountName = serviceAccountName
 		}
-
+		fillInitContainers(template, service)
 		return nil
 	}
 
@@ -681,14 +792,16 @@ func getServiceGroupID(service kobject.ServiceConfig, mode string) string {
 //     A warn/info message should be printed to let the user know.
 func KomposeObjectToServiceConfigGroupMapping(komposeObject *kobject.KomposeObject, opt kobject.ConvertOptions) map[string]kobject.ServiceConfigGroup {
 	serviceConfigGroup := make(map[string]kobject.ServiceConfigGroup)
+	sortedServiceConfigs := SortedKeys(komposeObject.ServiceConfigs)
 
-	for name, service := range komposeObject.ServiceConfigs {
-		groupID := getServiceGroupID(service, opt.ServiceGroupMode)
+	for _, service := range sortedServiceConfigs {
+		serviceConfig := komposeObject.ServiceConfigs[service]
+		groupID := getServiceGroupID(serviceConfig, opt.ServiceGroupMode)
 		if groupID != "" {
-			service.Name = name
-			service.InGroup = true
-			serviceConfigGroup[groupID] = append(serviceConfigGroup[groupID], service)
-			komposeObject.ServiceConfigs[name] = service
+			serviceConfig.Name = service
+			serviceConfig.InGroup = true
+			serviceConfigGroup[groupID] = append(serviceConfigGroup[groupID], serviceConfig)
+			komposeObject.ServiceConfigs[service] = serviceConfig
 		}
 	}
 
@@ -698,7 +811,7 @@ func KomposeObjectToServiceConfigGroupMapping(komposeObject *kobject.KomposeObje
 // TranslatePodResource config pod resources
 func TranslatePodResource(service *kobject.ServiceConfig, template *api.PodTemplateSpec) {
 	// Configure the resource limits
-	if service.MemLimit != 0 || service.CPULimit != 0 {
+	if service.MemLimit != 0 || service.CPULimit != 0 || service.DeployLabels["kompose.ephemeral-storage.limit"] != "" {
 		resourceLimit := api.ResourceList{}
 
 		if service.MemLimit != 0 {
@@ -709,11 +822,18 @@ func TranslatePodResource(service *kobject.ServiceConfig, template *api.PodTempl
 			resourceLimit[api.ResourceCPU] = *resource.NewMilliQuantity(service.CPULimit, resource.DecimalSI)
 		}
 
+		// Check for ephemeral-storage in deploy labels
+		if val, ok := service.DeployLabels["kompose.ephemeral-storage.limit"]; ok {
+			if quantity, err := resource.ParseQuantity(val); err == nil {
+				resourceLimit[api.ResourceEphemeralStorage] = quantity
+			}
+		}
+
 		template.Spec.Containers[0].Resources.Limits = resourceLimit
 	}
 
 	// Configure the resource requests
-	if service.MemReservation != 0 || service.CPUReservation != 0 {
+	if service.MemReservation != 0 || service.CPUReservation != 0 || service.DeployLabels["kompose.ephemeral-storage.request"] != "" {
 		resourceRequests := api.ResourceList{}
 
 		if service.MemReservation != 0 {
@@ -722,6 +842,13 @@ func TranslatePodResource(service *kobject.ServiceConfig, template *api.PodTempl
 
 		if service.CPUReservation != 0 {
 			resourceRequests[api.ResourceCPU] = *resource.NewMilliQuantity(service.CPUReservation, resource.DecimalSI)
+		}
+
+		// Check for ephemeral-storage in deploy labels
+		if val, ok := service.DeployLabels["kompose.ephemeral-storage.request"]; ok {
+			if quantity, err := resource.ParseQuantity(val); err == nil {
+				resourceRequests[api.ResourceEphemeralStorage] = quantity
+			}
 		}
 
 		template.Spec.Containers[0].Resources.Requests = resourceRequests
@@ -801,9 +928,9 @@ func (k *Kubernetes) RemoveDupObjects(objs *[]runtime.Object) {
 }
 
 // SortedKeys Ensure the kubernetes objects are in a consistent order
-func SortedKeys(komposeObject kobject.KomposeObject) []string {
+func SortedKeys[V kobject.ServiceConfig | kobject.ServiceConfigGroup](serviceConfig map[string]V) []string {
 	var sortedKeys []string
-	for name := range komposeObject.ServiceConfigs {
+	for name := range serviceConfig {
 		sortedKeys = append(sortedKeys, name)
 	}
 	sort.Strings(sortedKeys)
@@ -824,16 +951,9 @@ func DurationStrToSecondsInt(s string) (*int64, error) {
 }
 
 // GetEnvsFromFile get env vars from env_file
-func GetEnvsFromFile(file string, opt kobject.ConvertOptions) (map[string]string, error) {
-	// Get the correct file context / directory
-	composeDir, err := transformer.GetComposeFileDir(opt.InputFiles)
-	if err != nil {
-		return nil, errors.Wrap(err, "Unable to load file context")
-	}
-	fileLocation := path.Join(composeDir, file)
+func GetEnvsFromFile(file string) (map[string]string, error) {
 
-	// Load environment variables from file
-	envLoad, err := godotenv.Read(fileLocation)
+	envLoad, err := godotenv.Read(file)
 	if err != nil {
 		return nil, errors.Wrap(err, "Unable to read env_file")
 	}
@@ -851,10 +971,29 @@ func GetContentFromFile(file string) (string, error) {
 }
 
 // FormatEnvName format env name
-func FormatEnvName(name string) string {
+func FormatEnvName(name string, serviceName string) string {
 	envName := strings.Trim(name, "./")
+	// only take string after the last slash only if the string contains a slash
+	if strings.Contains(envName, "/") {
+		envName = envName[strings.LastIndex(envName, "/")+1:]
+	}
+
 	envName = strings.Replace(envName, ".", "-", -1)
-	envName = strings.Replace(envName, "/", "-", -1)
+	envName = getUsableNameEnvFile(envName, serviceName)
+	return envName
+}
+
+// getUsableNameEnvFile checks and adjusts the environment file name to make it usable.
+// If the first character of envName is a hyphen "-", it is concatenated with nameService.
+// If the length of envName is greater than 63, it is truncated to 63 characters.
+// Returns the adjusted environment file name.
+func getUsableNameEnvFile(envName string, serviceName string) string {
+	if string(envName[0]) == "-" { // -env-local....
+		envName = fmt.Sprintf("%s%s", serviceName, envName)
+	}
+	if len(envName) > 63 {
+		envName = envName[0:63]
+	}
 	return envName
 }
 
@@ -899,4 +1038,369 @@ func GetContainerArgs(service kobject.ServiceConfig) []string {
 		args = append(args, arg)
 	}
 	return args
+}
+
+// GetFileName extracts the file name from a given file path or file name.
+// If the input fileName contains a "/", it retrieves the substring after the last "/".
+// The function does not format the file name further, as it may contain periods or other valid characters.
+// Returns the extracted file name.
+func GetFileName(fileName string) string {
+	return filepath.Base(fileName)
+}
+
+// reformatSecretConfigUnderscoreWithDash takes a ServiceSecretConfig object as input and returns a new instance of ServiceSecretConfig
+// where the values of Source and Target are formatted using the FormatResourceName function to replace underscores with dashes and lowercase,
+// while the other fields remain unchanged. This is done to ensure consistency in the format of container names within the service's secret configuration.
+// this function ensures that source, target names are in an acceptable format for Kubernetes and other systems that may require a specific naming format.
+func reformatSecretConfigUnderscoreWithDash(secretConfig types.ServiceSecretConfig) types.ServiceSecretConfig {
+	newSecretConfig := types.ServiceSecretConfig{
+		Source:     FormatResourceName(secretConfig.Source),
+		Target:     FormatResourceName(secretConfig.Target),
+		UID:        secretConfig.UID,
+		GID:        secretConfig.GID,
+		Mode:       secretConfig.Mode,
+		Extensions: secretConfig.Extensions,
+	}
+
+	return newSecretConfig
+}
+
+// fillInitContainers looks for an initContainer resources and its passed as labels
+// if there is no image, it does not fill the initContainer
+// https://kubernetes.io/docs/concepts/workloads/pods/init-containers/
+func fillInitContainers(template *api.PodTemplateSpec, service kobject.ServiceConfig) {
+	resourceImage, exist := service.Labels[compose.LabelInitContainerImage]
+	if !exist || resourceImage == "" {
+		return
+	}
+	resourceName, exist := service.Labels[compose.LabelInitContainerName]
+	if !exist || resourceName == "" {
+		resourceName = "init-service"
+	}
+
+	template.Spec.InitContainers = append(template.Spec.InitContainers, api.Container{
+		Name:    resourceName,
+		Command: parseContainerCommandsFromStr(service.Labels[compose.LabelInitContainerCommand]),
+		Image:   resourceImage,
+	})
+}
+
+// parseContainerCommandsFromStr parses a string containing comma-separated commands
+// returns a slice of strings or a single command
+// example:
+// [ "bundle", "exec", "thin", "-p", "3000" ]
+//
+// example:
+// [ "bundle exec thin -p 3000" ]
+func parseContainerCommandsFromStr(line string) []string {
+	if line == "" {
+		return []string{}
+	}
+	var commands []string
+	if strings.Contains(line, ",") {
+		line = strings.TrimSpace(strings.Trim(line, "[]"))
+		commands = strings.Split(line, ",")
+		// remove space "'
+		for i := range commands {
+			commands[i] = strings.TrimSpace(strings.Trim(commands[i], `"' `))
+		}
+	} else {
+		commands = append(commands, line)
+	}
+	return commands
+}
+
+// searchHPAValues is useful to check if labels
+// contains any labels related to Horizontal Pod Autoscaler
+func searchHPAValues(labels map[string]string) bool {
+	for _, value := range LabelKeys {
+		if _, ok := labels[value]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+// createHPAResources creates a HorizontalPodAutoscaler (HPA) resource
+// It sets the number of replicas in the service to 0 because
+// the number of replicas will be managed by the HPA
+func createHPAResources(name string, service *kobject.ServiceConfig) hpa.HorizontalPodAutoscaler {
+	valuesHpa := getResourceHpaValues(service)
+	service.Replicas = 0
+	metrics := getHpaMetricSpec(valuesHpa)
+	scalerSpecs := hpa.HorizontalPodAutoscaler{
+		TypeMeta: metav1.TypeMeta{
+			Kind:       "HorizontalPodAutoscaler",
+			APIVersion: "autoscaling/v2",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name: name,
+		},
+		Spec: hpa.HorizontalPodAutoscalerSpec{
+			ScaleTargetRef: hpa.CrossVersionObjectReference{
+				Kind:       "Deployment",
+				Name:       name,
+				APIVersion: "apps/v1",
+			},
+			MinReplicas: &valuesHpa.MinReplicas,
+			MaxReplicas: valuesHpa.MaxReplicas,
+			Metrics:     metrics,
+		},
+	}
+
+	return scalerSpecs
+}
+
+// getResourceHpaValues retrieves the min/max replicas and CPU/memory utilization values
+// control if maxReplicas is less than minReplicas
+func getResourceHpaValues(service *kobject.ServiceConfig) HpaValues {
+	minReplicas := getHpaValue(service, compose.LabelHpaMinReplicas, DefaultMinReplicas)
+	maxReplicas := getHpaValue(service, compose.LabelHpaMaxReplicas, DefaultMaxReplicas)
+
+	if maxReplicas < minReplicas {
+		log.Warnf("maxReplicas %d is less than minReplicas %d. Using minReplicas value %d", maxReplicas, minReplicas, minReplicas)
+		maxReplicas = minReplicas
+	}
+
+	cpuUtilization := validatePercentageMetric(service, compose.LabelHpaCPU, DefaultCPUUtilization)
+	memoryUtilization := validatePercentageMetric(service, compose.LabelHpaMemory, DefaultMemoryUtilization)
+
+	return HpaValues{
+		MinReplicas:       minReplicas,
+		MaxReplicas:       maxReplicas,
+		CPUtilization:     cpuUtilization,
+		MemoryUtilization: memoryUtilization,
+	}
+}
+
+// validatePercentageMetric validates the CPU or memory metrics value
+// ensuring that it falls within the acceptable range [1, 100].
+func validatePercentageMetric(service *kobject.ServiceConfig, metricLabel string, defaultValue int32) int32 {
+	metricValue := getHpaValue(service, metricLabel, defaultValue)
+	if metricValue > 100 || metricValue < 1 {
+		log.Warnf("Metric value %d is not within the acceptable range [1, 100]. Using default value %d", metricValue, defaultValue)
+		return defaultValue
+	}
+	return metricValue
+}
+
+// getHpaValue convert the label value to integer
+// If the label is not present or the conversion fails
+// it returns the provided default value
+func getHpaValue(service *kobject.ServiceConfig, label string, defaultValue int32) int32 {
+	valueFromLabel, err := strconv.Atoi(service.Labels[label])
+	if err != nil || valueFromLabel < 0 {
+		log.Warnf("Error converting label %s. Using default value %d", label, defaultValue)
+		return defaultValue
+	}
+	return int32(valueFromLabel)
+}
+
+// getHpaMetricSpec returns a list of metric specs for the HPA resource
+// Target type is hardcoded to hpa.UtilizationMetricType
+// Each MetricSpec specifies the type metric CPU/memory and average utilization value
+// to trigger scaling
+func getHpaMetricSpec(hpaValues HpaValues) []hpa.MetricSpec {
+	var metrics []hpa.MetricSpec
+	if hpaValues.CPUtilization > 0 {
+		metrics = append(metrics, hpa.MetricSpec{
+			Type: hpa.ResourceMetricSourceType,
+			Resource: &hpa.ResourceMetricSource{
+				Name: api.ResourceCPU,
+				Target: hpa.MetricTarget{
+					Type:               hpa.UtilizationMetricType,
+					AverageUtilization: &hpaValues.CPUtilization,
+				},
+			},
+		})
+	}
+	if hpaValues.MemoryUtilization > 0 {
+		metrics = append(metrics, hpa.MetricSpec{
+			Type: hpa.ResourceMetricSourceType,
+			Resource: &hpa.ResourceMetricSource{
+				Name: api.ResourceMemory,
+				Target: hpa.MetricTarget{
+					Type:               hpa.UtilizationMetricType,
+					AverageUtilization: &hpaValues.MemoryUtilization,
+				},
+			},
+		})
+	}
+	return metrics
+}
+
+// isConfigFile checks if the given filePath should be used as a configMap
+// if dir is not empty, withindir are treated as cofigmaps
+// if it's configMap, mount readonly as default
+func isConfigFile(filePath string) (useConfigMap bool, readonly bool, skip bool) {
+	if filePath == "" || strings.HasSuffix(filePath, ".sock") {
+		skip = true
+		return
+	}
+
+	fi, err := os.Stat(filePath)
+	if err != nil {
+		log.Warnf("File don't exist or failed to check if the directory is empty: %v", err)
+		// dir/file not exist
+		// here not assigned skip to true,
+		// maybe dont want to skip
+		return
+	}
+
+	if !fi.Mode().IsRegular() { // is dir
+		isDirEmpty, err := checkIsEmptyDir(filePath)
+		if err != nil {
+			log.Warnf("Failed to check if the directory is empty: %v", err)
+			skip = true
+			return
+		}
+
+		if isDirEmpty {
+			return
+		}
+	}
+	return true, true, skip
+}
+
+// checkIsEmptyDir checks if filepath is empty
+func checkIsEmptyDir(filePath string) (bool, error) {
+	files, err := os.ReadDir(filePath)
+	if err != nil {
+		return false, err
+	}
+	if len(files) == 0 {
+		return true, err
+	}
+	for _, file := range files {
+		if !file.IsDir() {
+			return false, nil
+		}
+		_, err := checkIsEmptyDir(file.Name())
+		if err != nil {
+			return false, err
+		}
+	}
+	return true, nil
+}
+
+// setVolumeAccessMode sets the access mode for a volume based on the mode string
+// current types:
+// ReadOnly RO and ReadOnlyMany ROX can be mounted in read-only mode to many hosts
+// ReadWriteMany RWX can be mounted in read/write mode to many hosts
+// ReadWriteOncePod RWOP can be mounted in read/write mode to exactly 1 pod
+// ReadWriteOnce RWO can be mounted in read/write mode to exactly 1 host
+// https://kubernetes.io/docs/concepts/storage/persistent-volumes/#access-modes
+func setVolumeAccessMode(mode string, volumeAccesMode []api.PersistentVolumeAccessMode) []api.PersistentVolumeAccessMode {
+	switch mode {
+	case "ro", "rox":
+		volumeAccesMode = []api.PersistentVolumeAccessMode{api.ReadOnlyMany}
+	case "rwx":
+		volumeAccesMode = []api.PersistentVolumeAccessMode{api.ReadWriteMany}
+	case "rwop":
+		volumeAccesMode = []api.PersistentVolumeAccessMode{api.ReadWriteOncePod}
+	case "rwo":
+		volumeAccesMode = []api.PersistentVolumeAccessMode{api.ReadWriteOnce}
+	default:
+		volumeAccesMode = []api.PersistentVolumeAccessMode{api.ReadWriteOnce}
+	}
+
+	return volumeAccesMode
+}
+
+// fixNetworkModeToService is responsible for adjusting the network mode of services in docker compose (services:)
+// generate a mapping of deployments based on the network mode of each service
+// merging containers into the destination deployment, and removing transferred deployments
+func (k *Kubernetes) fixNetworkModeToService(objects *[]runtime.Object, services map[string]kobject.ServiceConfig) {
+	deploymentMappings := searchNetworkModeToService(services)
+	if len(deploymentMappings) == 0 {
+		return
+	}
+	mergeContainersIntoDestinationDeployment(deploymentMappings, objects)
+	removeDeploymentTransfered(deploymentMappings, objects)
+}
+
+// mergeContainersIntoDestinationDeployment takes a list of deployment mappings and a list of runtime objects
+// and merges containers from source deployment into the destination deployment
+func mergeContainersIntoDestinationDeployment(deploymentMappings []DeploymentMapping, objects *[]runtime.Object) {
+	for _, currentDeploymentMap := range deploymentMappings {
+		addContainersFromSourceToTargetDeployment(objects, currentDeploymentMap)
+	}
+}
+
+// addContainersFromSourceToTargetDeployment adds containers from the source deployment
+// if current deployment name matches source deployment name
+func addContainersFromSourceToTargetDeployment(objects *[]runtime.Object, currentDeploymentMap DeploymentMapping) {
+	for _, obj := range *objects {
+		if deploy, ok := obj.(*appsv1.Deployment); ok {
+			if deploy.ObjectMeta.Name == currentDeploymentMap.SourceDeploymentName {
+				addContainersToTargetDeployment(objects, deploy.Spec.Template.Spec.Containers, currentDeploymentMap.TargetDeploymentName)
+			}
+		}
+	}
+}
+
+// addContainersToTargetDeployment takes
+// - list of runtime objects
+// - list of containers to append
+// - deployment name to transfer
+// appends the containers to the target deployment if its name matches
+func addContainersToTargetDeployment(objects *[]runtime.Object, containersToAppend []api.Container, nameDeploymentToTransfer string) {
+	for _, obj := range *objects {
+		if deploy, ok := obj.(*appsv1.Deployment); ok {
+			if deploy.ObjectMeta.Name == nameDeploymentToTransfer {
+				deploy.Spec.Template.Spec.Containers = append(deploy.Spec.Template.Spec.Containers, containersToAppend...)
+			}
+		}
+	}
+}
+
+// searchNetworkModeToService iterates over services and checking their network mode service:
+// its separates over process of transferring containers,
+// it determines where each container should be removed from and where it should be added to
+func searchNetworkModeToService(services map[string]kobject.ServiceConfig) (deploymentMappings []DeploymentMapping) {
+	deploymentMappings = []DeploymentMapping{}
+	for _, service := range services {
+		if !strings.Contains(service.NetworkMode, NetworkModeService) {
+			continue
+		}
+		splitted := strings.Split(service.NetworkMode, ":")
+		if len(splitted) < 2 {
+			continue
+		}
+		deploymentMappings = append(deploymentMappings, DeploymentMapping{
+			SourceDeploymentName: service.Name,
+			TargetDeploymentName: splitted[1],
+		})
+	}
+	return deploymentMappings
+}
+
+// removeDeploymentTransfered iterates over a list of DeploymentMapping and
+// removes each deployment that marked in deploymentMappings
+func removeDeploymentTransfered(deploymentMappings []DeploymentMapping, objects *[]runtime.Object) {
+	for _, currentDeploymentMap := range deploymentMappings {
+		removeTargetDeployment(objects, currentDeploymentMap.SourceDeploymentName)
+	}
+}
+
+// removeTargetDeployment iterates over a list of runtime objects
+// and removes the target deployment from the list
+func removeTargetDeployment(objects *[]runtime.Object, targetDeploymentName string) {
+	for i := len(*objects) - 1; i >= 0; i-- {
+		if deploy, ok := (*objects)[i].(*appsv1.Deployment); ok {
+			if deploy.ObjectMeta.Name == targetDeploymentName {
+				*objects = removeFromSlice(*objects, (*objects)[i])
+			}
+		}
+	}
+}
+
+// removeFromSlice removes a specific object from a slice of runtime objects and returns the updated slice
+func removeFromSlice(objects []runtime.Object, objectToRemove runtime.Object) []runtime.Object {
+	for i, currentObject := range objects {
+		if reflect.DeepEqual(currentObject, objectToRemove) {
+			return append(objects[:i], objects[i+1:]...)
+		}
+	}
+	return objects
 }

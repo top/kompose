@@ -3,6 +3,7 @@ package kubernetes
 import (
 	"reflect"
 	"strconv"
+	"strings"
 
 	mapset "github.com/deckarep/golang-set"
 	"github.com/kubernetes/kompose/pkg/kobject"
@@ -48,7 +49,11 @@ func AddContainer(service kobject.ServiceConfig, opt kobject.ConvertOptions) Pod
 			LivenessProbe:  configProbe(service.HealthChecks.Liveness),
 			ReadinessProbe: configProbe(service.HealthChecks.Readiness),
 		})
-
+		if service.ImagePullSecret != "" {
+			podSpec.ImagePullSecrets = append(podSpec.ImagePullSecrets, api.LocalObjectReference{
+				Name: service.ImagePullSecret,
+			})
+		}
 		podSpec.Affinity = ConfigAffinity(service)
 	}
 }
@@ -139,11 +144,30 @@ func SecurityContext(name string, service kobject.ServiceConfig) PodSpecOption {
 			securityContext.Privileged = &service.Privileged
 		}
 		if service.User != "" {
-			uid, err := strconv.ParseInt(service.User, 10, 64)
-			if err != nil {
-				log.Warn("Ignoring user directive. User to be specified as a UID (numeric).")
-			} else {
-				securityContext.RunAsUser = &uid
+			switch userparts := strings.Split(service.User, ":"); len(userparts) {
+			default:
+				log.Warn("Ignoring ill-formed user directive. Must be in format UID or UID:GID.")
+			case 1:
+				uid, err := strconv.ParseInt(userparts[0], 10, 64)
+				if err != nil {
+					log.Warn("Ignoring user directive. User to be specified as a UID (numeric).")
+				} else {
+					securityContext.RunAsUser = &uid
+				}
+			case 2:
+				uid, err := strconv.ParseInt(userparts[0], 10, 64)
+				if err != nil {
+					log.Warn("Ignoring user name in user directive. User to be specified as a UID (numeric).")
+				} else {
+					securityContext.RunAsUser = &uid
+				}
+
+				gid, err := strconv.ParseInt(userparts[1], 10, 64)
+				if err != nil {
+					log.Warn("Ignoring group name in user directive. Group to be specified as a GID (numeric).")
+				} else {
+					securityContext.RunAsGroup = &gid
+				}
 			}
 		}
 
@@ -282,20 +306,20 @@ func configProbe(healthCheck kobject.HealthCheck) *api.Probe {
 	}
 
 	if len(healthCheck.Test) > 0 {
-		probe.Handler = api.Handler{
+		probe.ProbeHandler = api.ProbeHandler{
 			Exec: &api.ExecAction{
 				Command: healthCheck.Test,
 			},
 		}
 	} else if !reflect.ValueOf(healthCheck.HTTPPath).IsZero() && !reflect.ValueOf(healthCheck.HTTPPort).IsZero() {
-		probe.Handler = api.Handler{
+		probe.ProbeHandler = api.ProbeHandler{
 			HTTPGet: &api.HTTPGetAction{
 				Path: healthCheck.HTTPPath,
 				Port: intstr.FromInt(int(healthCheck.HTTPPort)),
 			},
 		}
 	} else if !reflect.ValueOf(healthCheck.TCPPort).IsZero() {
-		probe.Handler = api.Handler{
+		probe.ProbeHandler = api.ProbeHandler{
 			TCPSocket: &api.TCPSocketAction{
 				Port: intstr.FromInt(int(healthCheck.TCPPort)),
 			},

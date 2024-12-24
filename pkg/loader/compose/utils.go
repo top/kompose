@@ -19,10 +19,10 @@ package compose
 import (
 	"io"
 	"os"
-	"path/filepath"
 	"regexp"
 	"strings"
 
+	"github.com/compose-spec/compose-go/v2/types"
 	"github.com/kubernetes/kompose/pkg/kobject"
 	"github.com/pkg/errors"
 
@@ -76,11 +76,36 @@ const (
 	HealthCheckLivenessHTTPGetPort = "kompose.service.healthcheck.liveness.http_get_port"
 	// HealthCheckLivenessTCPPort defines liveness health check tcp port
 	HealthCheckLivenessTCPPort = "kompose.service.healthcheck.liveness.tcp_port"
-
 	// ServiceTypeHeadless ...
 	ServiceTypeHeadless = "Headless"
 	// LabelSecurityContextFsGroup defines the pod FsGroup
 	LabelSecurityContextFsGroup = "kompose.security-context.fsgroup"
+	// LabelContainerVolumeSubpath defines the volume mount subpath inside container
+	LabelContainerVolumeSubpath = "kompose.volume.subpath"
+	// LabelCronJobSchedule defines the cron job schedule
+	LabelCronJobSchedule = "kompose.cronjob.schedule"
+	// LabelCronJobConcurrencyPolicy defines the cron job concurrency policy
+	LabelCronJobConcurrencyPolicy = "kompose.cronjob.concurrency_policy"
+	// LabelCronJobBackoffLimit defines the job backoff limit
+	LabelCronJobBackoffLimit = "kompose.cronjob.backoff_limit"
+	// LabelInitContainerName defines name resource
+	LabelInitContainerName = "kompose.init.containers.name"
+	// LabelInitContainerImage defines image to pull
+	LabelInitContainerImage = "kompose.init.containers.image"
+	// LabelInitContainerCommand defines commands
+	LabelInitContainerCommand = "kompose.init.containers.command"
+	// LabelHpaMinReplicas defines min pod replicas
+	LabelHpaMinReplicas = "kompose.hpa.replicas.min"
+	// LabelHpaMaxReplicas defines max pod replicas
+	LabelHpaMaxReplicas = "kompose.hpa.replicas.max"
+	// LabelHpaCpu defines scaling decisions based on CPU utilization
+	LabelHpaCPU = "kompose.hpa.cpu"
+	// LabelHpaMemory defines scaling decisions based on memory utilization
+	LabelHpaMemory = "kompose.hpa.memory"
+	// LabelNameOverride defines the override resource name
+	LabelNameOverride = "kompose.service.name_override"
+	// LabelExposeContainerToHost defines whether to expose container to host or not using hostPort
+	LabelExposeContainerToHost = "kompose.controller.port.expose"
 )
 
 // load environment variables from compose file
@@ -124,20 +149,6 @@ func loadEnvVars(envars []string) []kobject.EnvVar {
 	}
 
 	return envs
-}
-
-// getComposeFileDir returns compose file directory
-// Assume all the docker-compose files are in the same directory
-func getComposeFileDir(inputFiles []string) (string, error) {
-	inputFile := inputFiles[0]
-	if strings.Index(inputFile, "/") != 0 {
-		workDir, err := os.Getwd()
-		if err != nil {
-			return "", errors.Wrap(err, "Unable to retrieve compose file directory")
-		}
-		inputFile = filepath.Join(workDir, inputFile)
-	}
-	return filepath.Dir(inputFile), nil
 }
 
 func handleServiceType(ServiceType string) (string, error) {
@@ -201,4 +212,16 @@ func ReadFile(fileName string) ([]byte, error) {
 		return StdinData, nil
 	}
 	return os.ReadFile(fileName)
+}
+
+// Choose normalized name from resource in case exist LabelNameOverride
+// from label
+func parseResourceName(resourceName string, labels types.Labels) string {
+	// Opted to use normalizeContainerNames over normalizeServiceNames
+	// as in tests, normalization is only to lowercase.
+	normalizedName := normalizeContainerNames(resourceName)
+	if labelValue, exist := labels[LabelNameOverride]; exist {
+		normalizedName = normalizeContainerNames(labelValue)
+	}
+	return normalizedName
 }

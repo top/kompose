@@ -82,12 +82,7 @@ test-openshift:
 # run commandline tests
 .PHONY: test-cmd
 test-cmd:
-	./script/test/cmd/tests_new.sh
-
-# generate commandline tests
-.PHONY: gen-cmd
-gen-cmd:
-	./script/test/cmd/make-test.sh
+	./script/test/cmd/tests.sh
 
 # run all validation tests
 .PHONY: validate
@@ -138,3 +133,7 @@ install-golangci-lint:
 .PHONY: golangci-lint
 golangci-lint: install-golangci-lint
 	$(GOLANGCI_LINT) run -c .golangci.yml --timeout 5m
+
+.PHONY: test-client
+test-client: 
+	go test ./client/...

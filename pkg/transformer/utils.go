@@ -22,6 +22,7 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	dockerlib "github.com/fsouza/go-dockerclient"
@@ -31,6 +32,8 @@ import (
 	"github.com/pkg/errors"
 	log "github.com/sirupsen/logrus"
 	api "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 )
 
 // Selector used as labels and selector
@@ -118,7 +121,7 @@ func parseVolume(volume string) (name, host, container, mode string, err error) 
 	return
 }
 
-// parseVolume parses window volume.
+// parseWindowsVolume parses window volume.
 // example: windows host mount to windows container
 // volume = dataVolumeName:C:\Users\Data:D:\config:rw
 // it can be parsed:
@@ -245,12 +248,9 @@ func ConfigAllLabels(name string, service *kobject.ServiceConfig) map[string]str
 // ConfigAnnotations configures annotations
 func ConfigAnnotations(service kobject.ServiceConfig) map[string]string {
 	annotations := map[string]string{}
+
 	for key, value := range service.Annotations {
 		annotations[key] = value
-	}
-
-	if !service.WithKomposeAnnotation {
-		return annotations
 	}
 
 	annotations["kompose.cmd"] = strings.Join(os.Args, " ")
@@ -266,12 +266,24 @@ func ConfigAnnotations(service kobject.ServiceConfig) map[string]string {
 		annotations["kompose.version"] = version.VERSION + " (" + version.GITCOMMIT + ")"
 	}
 
+	// if service.WithKomposeAnnotation = false, we remove **all** kompose annotations (io.kompose.*)
+	if !service.WithKomposeAnnotation {
+		for key := range annotations {
+			if strings.HasPrefix(key, "kompose.") {
+				delete(annotations, key)
+			}
+		}
+	}
+
 	return annotations
 }
 
 // Print either prints to stdout or to file/s
 func Print(name, path string, trailing string, data []byte, toStdout, generateJSON bool, f *os.File, provider string) (string, error) {
 	file := ""
+	// TODO: we should refactor / change this hack in the future once we have a better solution
+	re := regexp.MustCompile(`(?s)status:\n.*`)
+	data = re.ReplaceAll(data, nil)
 	if generateJSON {
 		file = fmt.Sprintf("%s-%s.json", name, trailing)
 	} else {
@@ -328,14 +340,15 @@ func (env EnvSort) Swap(i, j int) {
 
 // GetComposeFileDir returns compose file directory
 func GetComposeFileDir(inputFiles []string) (string, error) {
+	// Check if input files are specified
+	if len(inputFiles) <= 0 {
+		return "", errors.New("No input files specified")
+	}
+
 	// Lets assume all the docker-compose files are in the same directory
-	inputFile := inputFiles[0]
-	if strings.Index(inputFile, "/") != 0 {
-		workDir, err := os.Getwd()
-		if err != nil {
-			return "", err
-		}
-		inputFile = filepath.Join(workDir, inputFile)
+	inputFile, err := filepath.Abs(inputFiles[0])
+	if err != nil {
+		return "", err
 	}
 	log.Debugf("Compose file dir: %s", filepath.Dir(inputFile))
 	return filepath.Dir(inputFile), nil
@@ -387,7 +400,7 @@ func BuildDockerImage(service kobject.ServiceConfig, name string) error {
 	// Use the build struct function to build the image
 	// Build the image!
 	build := docker.Build{Client: *client}
-	err = build.BuildImage(imagePath, imageName, service.Dockerfile, buildargs)
+	err = build.BuildImage(imagePath, imageName, service.Dockerfile, buildargs, service.BuildTarget)
 
 	if err != nil {
 		return err
@@ -442,4 +455,34 @@ func PushDockerImageWithOpt(service kobject.ServiceConfig, serviceName string, o
 	}
 
 	return nil
+}
+
+// CreateNamespace creates a Kubernetes namespace, which can be used in both:
+// Openshift and Kubernetes
+func CreateNamespace(namespace string) *api.Namespace {
+	return &api.Namespace{
+		TypeMeta: metav1.TypeMeta{
+			Kind:       "Namespace",
+			APIVersion: "v1",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name: namespace,
+		},
+	}
+}
+
+// AssignNamespaceToObjects will add the namespace metadata to each object
+func AssignNamespaceToObjects(objs *[]runtime.Object, namespace string) {
+	ns := "default"
+	if namespace != "" {
+		ns = namespace
+	}
+	var result []runtime.Object
+	for _, obj := range *objs {
+		if us, ok := obj.(metav1.Object); ok {
+			us.SetNamespace(ns)
+		}
+		result = append(result, obj)
+	}
+	*objs = result
 }

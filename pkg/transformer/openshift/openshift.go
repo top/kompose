@@ -259,6 +259,12 @@ func (o *OpenShift) Transform(komposeObject kobject.KomposeObject, opt kobject.C
 	}
 	// this will hold all the converted data
 	var allobjects []runtime.Object
+
+	if komposeObject.Namespace != "" {
+		ns := transformer.CreateNamespace(komposeObject.Namespace)
+		allobjects = append(allobjects, ns)
+	}
+
 	var err error
 	var composeFileDir string
 	buildRepo := opt.BuildRepo
@@ -274,7 +280,7 @@ func (o *OpenShift) Transform(komposeObject kobject.KomposeObject, opt kobject.C
 		}
 	}
 
-	sortedKeys := kubernetes.SortedKeys(komposeObject)
+	sortedKeys := kubernetes.SortedKeys(komposeObject.ServiceConfigs)
 	for _, name := range sortedKeys {
 		service := komposeObject.ServiceConfigs[name]
 		var objects []runtime.Object
@@ -319,14 +325,27 @@ func (o *OpenShift) Transform(komposeObject kobject.KomposeObject, opt kobject.C
 			}
 		}
 
-		// Generate pod only and nothing more
+		// Generate pod or cronjob and configmap objects
 		if service.Restart == "no" || service.Restart == "on-failure" {
 			// Error out if Controller Object is specified with restart: 'on-failure'
 			if opt.IsDeploymentConfigFlag {
 				return nil, errors.New("Controller object cannot be specified with restart: 'on-failure'")
 			}
-			pod := o.InitPod(name, service)
-			objects = append(objects, pod)
+
+			if service.CronJobSchedule != "" {
+				cronJob := o.InitCJ(name, service, service.CronJobSchedule, service.CronJobConcurrencyPolicy, service.CronJobBackoffLimit)
+				objects = append(objects, cronJob)
+			} else {
+				pod := o.InitPod(name, service)
+				objects = append(objects, pod)
+			}
+
+			if len(service.EnvFile) > 0 {
+				for _, envFile := range service.EnvFile {
+					configMap := o.InitConfigMapForEnv(name, opt, envFile)
+					objects = append(objects, configMap)
+				}
+			}
 		} else {
 			objects = o.CreateWorkloadAndConfigMapObjects(name, service, opt)
 
@@ -422,6 +441,9 @@ func (o *OpenShift) Transform(komposeObject kobject.KomposeObject, opt kobject.C
 	// sort all object so Services are first
 	o.SortServicesFirst(&allobjects)
 	o.RemoveDupObjects(&allobjects)
+	if komposeObject.Namespace != "" {
+		transformer.AssignNamespaceToObjects(&allobjects, komposeObject.Namespace)
+	}
 	// o.FixWorkloadVersion(&allobjects)
 
 	return allobjects, nil

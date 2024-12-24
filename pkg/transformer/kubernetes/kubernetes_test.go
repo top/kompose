@@ -23,7 +23,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/compose-spec/compose-go/types"
+	"github.com/compose-spec/compose-go/v2/types"
 
 	"github.com/kubernetes/kompose/pkg/kobject"
 	"github.com/kubernetes/kompose/pkg/loader/compose"
@@ -32,6 +32,7 @@ import (
 	"github.com/pkg/errors"
 	appsv1 "k8s.io/api/apps/v1"
 	api "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	networkingv1beta1 "k8s.io/api/networking/v1beta1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -49,7 +50,6 @@ func newServiceConfig() kobject.ServiceConfig {
 		WorkingDir:      "dir",
 		Args:            []string{"arg1", "arg2"},
 		VolList:         []string{"/tmp/volume"},
-		Network:         []string{"network1", "network2"}, // supported
 		Labels:          nil,
 		FsGroup:         1001,
 		Annotations:     map[string]string{"abc": "def"},
@@ -87,10 +87,11 @@ func newKomposeObject() kobject.KomposeObject {
 
 func newKomposeObjectHostPortProtocolConfig() kobject.ServiceConfig {
 	return kobject.ServiceConfig{
-		Name:          "nginx",
-		ContainerName: "nginx",
-		Image:         "nginx",
-		Port:          []kobject.Ports{{HostPort: 80, Protocol: string(api.ProtocolTCP), ContainerPort: 80}},
+		Name:                  "nginx",
+		ContainerName:         "nginx",
+		Image:                 "nginx",
+		Port:                  []kobject.Ports{{HostPort: 80, Protocol: string(api.ProtocolTCP), ContainerPort: 80}},
+		ExposeContainerToHost: true,
 	}
 }
 
@@ -101,6 +102,13 @@ func newServiceConfigWithExternalTrafficPolicy() kobject.ServiceConfig {
 		Port:                         []kobject.Ports{{HostPort: 123, ContainerPort: 456}},
 		ServiceType:                  loadBalancerServiceType,
 		ServiceExternalTrafficPolicy: "local",
+	}
+}
+
+func newServiceConfigWithServiceVolumeMount(volumeMountSubPathValue string) kobject.ServiceConfig {
+	return kobject.ServiceConfig{
+		Name:               "app",
+		VolumeMountSubPath: volumeMountSubPathValue,
 	}
 }
 
@@ -319,16 +327,16 @@ func TestKomposeConvert(t *testing.T) {
 		opt             kobject.ConvertOptions
 		expectedNumObjs int
 	}{
-		// objects generated are deployment, service nework policies (2) and pvc
-		"Convert to Deployments (D)":                  {newKomposeObject(), kobject.ConvertOptions{CreateD: true, Replicas: replicas, IsReplicaSetFlag: true}, 6},
-		"Convert to Deployments (D) with v3 replicas": {newKomposeObject(), kobject.ConvertOptions{CreateD: true}, 6},
-		"Convert to DaemonSets (DS)":                  {newKomposeObject(), kobject.ConvertOptions{CreateDS: true}, 6},
+		// objects generated are deployment, service network policies (2) and pvc
+		"Convert to Deployments (D)":                  {newKomposeObject(), kobject.ConvertOptions{CreateD: true, Replicas: replicas, IsReplicaSetFlag: true}, 4},
+		"Convert to Deployments (D) with v3 replicas": {newKomposeObject(), kobject.ConvertOptions{CreateD: true}, 4},
+		"Convert to DaemonSets (DS)":                  {newKomposeObject(), kobject.ConvertOptions{CreateDS: true}, 4},
 		// objects generated are deployment, daemonset, ReplicationController, service and pvc
-		"Convert to D, DS, and RC":                  {newKomposeObject(), kobject.ConvertOptions{CreateD: true, CreateDS: true, CreateRC: true, Replicas: replicas, IsReplicaSetFlag: true}, 7},
-		"Convert to D, DS, and RC with v3 replicas": {newKomposeObject(), kobject.ConvertOptions{CreateD: true, CreateDS: true, CreateRC: true}, 7},
+		"Convert to D, DS, and RC":                  {newKomposeObject(), kobject.ConvertOptions{CreateD: true, CreateDS: true, CreateRC: true, Replicas: replicas, IsReplicaSetFlag: true}, 5},
+		"Convert to D, DS, and RC with v3 replicas": {newKomposeObject(), kobject.ConvertOptions{CreateD: true, CreateDS: true, CreateRC: true}, 5},
 		// objects generated are statefulset
-		"Convert to SS with replicas ":   {newKomposeObject(), kobject.ConvertOptions{Controller: StatefulStateController, Replicas: replicas, IsReplicaSetFlag: true}, 5},
-		"Convert to SS without replicas": {newKomposeObject(), kobject.ConvertOptions{Controller: StatefulStateController}, 5},
+		"Convert to SS with replicas ":   {newKomposeObject(), kobject.ConvertOptions{Controller: StatefulStateController, Replicas: replicas, IsReplicaSetFlag: true}, 3},
+		"Convert to SS without replicas": {newKomposeObject(), kobject.ConvertOptions{Controller: StatefulStateController}, 3},
 	}
 
 	for name, test := range testCases {
@@ -749,7 +757,7 @@ func TestMultipleContainersInPod(t *testing.T) {
 		config.Volumes = []kobject.Volumes{
 			{
 				VolumeName: "mountVolume",
-				MountPath:  "/data",
+				MountPath:  "/data-dir",
 			},
 		}
 		return config
@@ -1021,5 +1029,228 @@ func TestServiceExternalTrafficPolicy(t *testing.T) {
 				t.Errorf("Expected LoadBalancer as service type, got %v", serviceType)
 			}
 		}
+	}
+}
+
+func TestVolumeMountSubPath(t *testing.T) {
+	groupName := "pod_group"
+	expectedSubPathValue := "test-subpath"
+	komposeObject := kobject.KomposeObject{
+		ServiceConfigs: map[string]kobject.ServiceConfig{"app": newServiceConfigWithServiceVolumeMount(expectedSubPathValue)},
+	}
+	k := Kubernetes{}
+	objs, err := k.Transform(komposeObject, kobject.ConvertOptions{ServiceGroupMode: groupName})
+	if err != nil {
+		t.Error(errors.Wrap(err, "k.Transform failed"))
+	}
+	for _, obj := range objs {
+		if deployment, ok := obj.(*appsv1.Deployment); ok {
+			volMountSubPath := deployment.Spec.Template.Spec.Containers[0].VolumeMounts[0].SubPath
+			if volMountSubPath != expectedSubPathValue {
+				t.Errorf("Expected VolumeMount Subpath %v, got %v", expectedSubPathValue, volMountSubPath)
+			}
+		}
+	}
+}
+
+func TestNetworkPoliciesGeneration(t *testing.T) {
+	groupName := "pod_group"
+	komposeObject := kobject.KomposeObject{
+		ServiceConfigs: map[string]kobject.ServiceConfig{"app": newServiceConfig()},
+	}
+	k := Kubernetes{}
+	objs, err := k.Transform(komposeObject, kobject.ConvertOptions{ServiceGroupMode: groupName, GenerateNetworkPolicies: true})
+	if err != nil {
+		t.Error(errors.Wrap(err, "k.Transform failed"))
+	}
+	for _, obj := range objs {
+		if np, ok := obj.(*networkingv1.NetworkPolicy); ok {
+			matchLabelsLength := len(np.Spec.PodSelector.MatchLabels)
+			if matchLabelsLength == 0 {
+				t.Errorf("Expected length of Network Policy PodSelector to be greater than 0, got %v", matchLabelsLength)
+			}
+		}
+	}
+}
+
+func TestServiceGroupModeImagePullSecrets(t *testing.T) {
+	groupName := "pod_group"
+	serviceConfig := newServiceConfig()
+	komposeObject := kobject.KomposeObject{
+		ServiceConfigs: map[string]kobject.ServiceConfig{"app": serviceConfig},
+	}
+	k := Kubernetes{}
+	objs, err := k.Transform(komposeObject, kobject.ConvertOptions{ServiceGroupMode: groupName, GenerateNetworkPolicies: true})
+	if err != nil {
+		t.Error(errors.Wrap(err, "k.Transform failed"))
+	}
+	expectedSecretsLen := len(serviceConfig.ImagePullSecret)
+	for _, obj := range objs {
+		if deployment, ok := obj.(*appsv1.Deployment); ok {
+			secretsLen := len(deployment.Spec.Template.Spec.ImagePullSecrets)
+			if secretsLen != expectedSecretsLen {
+				t.Errorf("Expected length of Deployment ImagePullSecrets to be equal to %v, got %v", expectedSecretsLen, secretsLen)
+			}
+		}
+	}
+}
+
+func TestNamespaceGeneration(t *testing.T) {
+	ns := "app"
+	komposeObject := kobject.KomposeObject{
+		ServiceConfigs: map[string]kobject.ServiceConfig{"app": newServiceConfig()},
+		Namespace:      ns,
+	}
+	k := Kubernetes{}
+	objs, err := k.Transform(komposeObject, kobject.ConvertOptions{})
+	if err != nil {
+		t.Error(errors.Wrap(err, "k.Transform failed"))
+	}
+	for _, obj := range objs {
+		if namespace, ok := obj.(*api.Namespace); ok {
+			if strings.ToLower(ns) != strings.ToLower(namespace.ObjectMeta.Name) {
+				t.Errorf("Expected namespace name %v, got %v", ns, namespace.ObjectMeta.Name)
+			}
+		}
+		if dep, ok := obj.(*appsv1.Deployment); ok {
+			if dep.ObjectMeta.Namespace != ns {
+				t.Errorf("Expected deployment namespace %v, got %v", ns, dep.ObjectMeta.Namespace)
+			}
+		}
+	}
+}
+
+// Test namespace generation with namespace being blank / ""
+func TestNamespaceGenerationBlank(t *testing.T) {
+	ns := ""
+	komposeObject := kobject.KomposeObject{
+		ServiceConfigs: map[string]kobject.ServiceConfig{"app": newServiceConfig()},
+		Namespace:      ns,
+	}
+	k := Kubernetes{}
+	objs, err := k.Transform(komposeObject, kobject.ConvertOptions{})
+	if err != nil {
+		t.Error(errors.Wrap(err, "k.Transform failed"))
+	}
+	for _, obj := range objs {
+		if namespace, ok := obj.(*api.Namespace); ok {
+			if strings.ToLower(ns) != strings.ToLower(namespace.ObjectMeta.Name) {
+				t.Errorf("Expected namespace name %v, got %v", ns, namespace.ObjectMeta.Name)
+			}
+		}
+		if dep, ok := obj.(*appsv1.Deployment); ok {
+			if dep.ObjectMeta.Namespace != ns {
+				t.Errorf("Expected deployment namespace %v, got %v", ns, dep.ObjectMeta.Namespace)
+			}
+		}
+	}
+}
+
+func TestKubernetes_CreateSecrets(t *testing.T) {
+	var komposeDefaultObject []kobject.KomposeObject
+	dataSecrets := []SecretsConfig{
+		{
+			nameSecretConfig: "config-ini",
+			nameSecret:       "debug-config-ini",
+			pathFile:         "../../../docs/CNAME",
+		},
+		{
+			nameSecretConfig: "new-config-init",
+			nameSecret:       "new-debug-config-ini",
+			pathFile:         "../../../docs/CNAME",
+		},
+	}
+
+	for i := 0; i < len(dataSecrets); i++ {
+		komposeDefaultObject = append(komposeDefaultObject, newKomposeObject())
+		komposeDefaultObject[i].Secrets = newSecrets(dataSecrets[i])
+	}
+
+	type fields struct {
+		Opt kobject.ConvertOptions
+	}
+	type args struct {
+		komposeObject kobject.KomposeObject
+	}
+
+	tests := []struct {
+		name    string
+		fields  fields
+		args    args
+		want    []*api.Secret
+		wantErr bool
+	}{
+		{
+			name: "CreateSecrets from default KomposeObject and secrets taken from CNAME file",
+			args: args{
+				komposeObject: komposeDefaultObject[0],
+			},
+			want: []*api.Secret{
+				{
+					TypeMeta: metav1.TypeMeta{
+						Kind:       "Secret",
+						APIVersion: "v1",
+					},
+					ObjectMeta: metav1.ObjectMeta{
+						Name:   FormatResourceName(dataSecrets[0].nameSecretConfig),
+						Labels: transformer.ConfigLabels(dataSecrets[0].nameSecretConfig),
+					},
+					Type: api.SecretTypeOpaque,
+					Data: map[string][]byte{dataSecrets[0].nameSecretConfig: []byte("kompose.io")},
+				},
+			},
+		},
+		{
+			name: "CreateSecrets from default KomposeObject and secrets taken from CNAME file",
+			args: args{
+				komposeObject: komposeDefaultObject[1],
+			},
+			want: []*api.Secret{
+				{
+					TypeMeta: metav1.TypeMeta{
+						Kind:       "Secret",
+						APIVersion: "v1",
+					},
+					ObjectMeta: metav1.ObjectMeta{
+						Name:   FormatResourceName(dataSecrets[1].nameSecretConfig),
+						Labels: transformer.ConfigLabels(dataSecrets[1].nameSecretConfig),
+					},
+					Type: api.SecretTypeOpaque,
+					Data: map[string][]byte{dataSecrets[1].nameSecretConfig: []byte("kompose.io")},
+				},
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			k := &Kubernetes{
+				Opt: tt.fields.Opt,
+			}
+			got, err := k.CreateSecrets(tt.args.komposeObject)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("Kubernetes.CreateSecrets() error = %v, wantErr %v", err, tt.wantErr)
+				return
+			}
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("Kubernetes.CreateSecrets() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// struct defines the configuration parameters required for creating a secret
+type SecretsConfig struct {
+	nameSecretConfig string
+	nameSecret       string
+	pathFile         string
+}
+
+// creates a new instance of types.Secrets based on the provided SecretsConfig parameter
+func newSecrets(stringsSecretConfig SecretsConfig) types.Secrets {
+	return types.Secrets{
+		stringsSecretConfig.nameSecretConfig: types.SecretConfig{
+			Name: stringsSecretConfig.nameSecret,
+			File: stringsSecretConfig.pathFile,
+		},
 	}
 }

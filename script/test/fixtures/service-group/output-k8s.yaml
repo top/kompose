@@ -2,7 +2,6 @@
 apiVersion: v1
 kind: Service
 metadata:
-  creationTimestamp: null
   labels:
     io.kompose.service: librenms-dispatcher
   name: librenms
@@ -13,14 +12,12 @@ spec:
       targetPort: 8000
   selector:
     io.kompose.service: librenms-dispatcher
-status:
-  loadBalancer: {}
+
 
 ---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  creationTimestamp: null
   labels:
     io.kompose.service: librenms-dispatcher
   name: librenms-dispatcher
@@ -33,47 +30,39 @@ spec:
     type: Recreate
   template:
     metadata:
-      creationTimestamp: null
       labels:
-        io.kompose.network/service-group-default: "true"
         io.kompose.service: librenms-dispatcher
     spec:
       containers:
         - env:
             - name: TZ
-              value: ${TZ}
-          image: librenms/librenms:latest
-          name: librenms
-          ports:
-            - containerPort: 8000
-              hostPort: 8000
-              protocol: TCP
-          resources: {}
+          image: librenms/dispatcher:latest
+          name: dispatcher
           volumeMounts:
             - mountPath: /data
               name: librenms-dispatcher-claim0
         - env:
             - name: TZ
-              value: ${TZ}
-          image: librenms/dispatcher:latest
-          name: dispatcher
-          resources: {}
+          image: librenms/librenms:latest
+          name: librenms
+          ports:
+            - containerPort: 8000
+              protocol: TCP
           volumeMounts:
             - mountPath: /data
               name: librenms-dispatcher-claim0
-      hostname: dispatcher
+      hostname: librenms
       restartPolicy: Always
       volumes:
         - name: librenms-dispatcher-claim0
           persistentVolumeClaim:
             claimName: librenms-dispatcher-claim0
-status: {}
+
 
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  creationTimestamp: null
   labels:
     io.kompose.service: librenms-dispatcher-claim0
   name: librenms-dispatcher-claim0
@@ -83,21 +72,5 @@ spec:
   resources:
     requests:
       storage: 100Mi
-status: {}
 
----
-apiVersion: networking.k8s.io/v1
-kind: NetworkPolicy
-metadata:
-  creationTimestamp: null
-  name: service-group-default
-spec:
-  ingress:
-    - from:
-        - podSelector:
-            matchLabels:
-              io.kompose.network/service-group-default: "true"
-  podSelector:
-    matchLabels:
-      io.kompose.network/service-group-default: "true"
 

@@ -2,7 +2,6 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  creationTimestamp: null
   labels:
     io.kompose.service: db
   name: db
@@ -15,15 +14,12 @@ spec:
     type: Recreate
   template:
     metadata:
-      creationTimestamp: null
       labels:
-        io.kompose.network/configmap-volume-default: "true"
         io.kompose.service: db
     spec:
       containers:
         - image: mysql
           name: db
-          resources: {}
           volumeMounts:
             - mountPath: /data/configs.tar
               name: db-cm0
@@ -36,7 +32,7 @@ spec:
                 path: configs.tar
             name: db-cm0
           name: db-cm0
-status: {}
+
 
 ---
 apiVersion: v1
@@ -46,32 +42,14 @@ kind: ConfigMap
 metadata:
   annotations:
     use-subpath: "true"
-  creationTimestamp: null
   labels:
     io.kompose.service: db
   name: db-cm0
 
 ---
-apiVersion: networking.k8s.io/v1
-kind: NetworkPolicy
-metadata:
-  creationTimestamp: null
-  name: configmap-volume-default
-spec:
-  ingress:
-    - from:
-        - podSelector:
-            matchLabels:
-              io.kompose.network/configmap-volume-default: "true"
-  podSelector:
-    matchLabels:
-      io.kompose.network/configmap-volume-default: "true"
-
----
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  creationTimestamp: null
   labels:
     io.kompose.service: web
   name: web
@@ -84,15 +62,12 @@ spec:
     type: Recreate
   template:
     metadata:
-      creationTimestamp: null
       labels:
-        io.kompose.network/configmap-volume-default: "true"
         io.kompose.service: web
     spec:
       containers:
         - image: nginx
           name: web
-          resources: {}
           volumeMounts:
             - mountPath: /etc/tls
               name: web-cm0
@@ -110,7 +85,6 @@ spec:
                 path: test-a-key.key
             name: web-cm1
           name: web-cm1
-status: {}
 
 ---
 apiVersion: v1
@@ -119,7 +93,6 @@ data:
   a.key: test-key-data....
 kind: ConfigMap
 metadata:
-  creationTimestamp: null
   labels:
     io.kompose.service: web
   name: web-cm0
@@ -132,7 +105,6 @@ kind: ConfigMap
 metadata:
   annotations:
     use-subpath: "true"
-  creationTimestamp: null
   labels:
     io.kompose.service: web
   name: web-cm1

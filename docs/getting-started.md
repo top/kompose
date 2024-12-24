@@ -20,7 +20,7 @@ For beginners and the most compatibility, follow the _Minikube and Kompose_ guid
 
 ## Minikube and Kompose
 
-In this guide, we'll deploy a sample `docker-compose.yaml` file to a Kubernetes cluster.
+In this guide, we'll deploy a sample `compose.yaml` file to a Kubernetes cluster.
 
 Requirements:
 
@@ -44,24 +44,24 @@ Starting cluster components...
 Kubectl is now configured to use the cluster
 ```
 
-**Download an [example Docker Compose file](https://raw.githubusercontent.com/kubernetes/kompose/main/examples/docker-compose.yaml), or use your own:**
+**Download an [example Compose file](https://raw.githubusercontent.com/kubernetes/kompose/main/examples/compose.yaml), or use your own:**
 
 ```sh
-wget https://raw.githubusercontent.com/kubernetes/kompose/main/examples/docker-compose.yaml
+wget https://raw.githubusercontent.com/kubernetes/kompose/main/examples/compose.yaml
 ```
 
-**Convert your Docker Compose file to Kubernetes:**
+**Convert your Compose file to Kubernetes:**
 
-Run `kompose convert` in the same directory as your `docker-compose.yaml` file.
+Run `kompose convert` in the same directory as your `compose.yaml` file.
 
 ```sh
 $ kompose convert
 INFO Kubernetes file "frontend-service.yaml" created
-INFO Kubernetes file "redis-master-service.yaml" created
-INFO Kubernetes file "redis-slave-service.yaml" created
+INFO Kubernetes file "redis-leader-service.yaml" created
+INFO Kubernetes file "redis-replica-service.yaml" created
 INFO Kubernetes file "frontend-deployment.yaml" created
-INFO Kubernetes file "redis-master-deployment.yaml" created
-INFO Kubernetes file "redis-slave-deployment.yaml" created
+INFO Kubernetes file "redis-leader-deployment.yaml" created
+INFO Kubernetes file "redis-replica-deployment.yaml" created
 ```
 
 Then you can use `kubectl apply` to create these resources in Kubernetes.
@@ -110,7 +110,7 @@ $ curl http://123.45.67.89
 
 ## Minishift and Kompose
 
-In this guide, we'll deploy a sample `docker-compose.yaml` file to an OpenShift cluster.
+In this guide, we'll deploy a sample `compose.yaml` file to an OpenShift cluster.
 
 Requirements:
 
@@ -134,27 +134,27 @@ Starting local OpenShift cluster using 'kvm' hypervisor...
 ...
 ```
 
-**Download an [example Docker Compose file](https://raw.githubusercontent.com/kubernetes/kompose/main/examples/docker-compose.yaml), or use your own:**
+**Download an [example Compose file](https://raw.githubusercontent.com/kubernetes/kompose/main/examples/compose.yaml), or use your own:**
 
 ```sh
-wget https://raw.githubusercontent.com/kubernetes/kompose/main/examples/docker-compose.yaml
+wget https://raw.githubusercontent.com/kubernetes/kompose/main/examples/compose.yaml
 ```
 
-**Convert your Docker Compose file to OpenShift:**
+**Convert your Compose file to OpenShift:**
 
-Run `kompose convert --provider=openshift` in the same directory as your `docker-compose.yaml` file.
+Run `kompose convert --provider=openshift` in the same directory as your `compose.yaml` file.
 
 ```sh
 $ kompose convert --provider=openshift
 INFO OpenShift file "frontend-service.yaml" created
-INFO OpenShift file "redis-master-service.yaml" created
-INFO OpenShift file "redis-slave-service.yaml" created
+INFO OpenShift file "redis-leader-service.yaml" created
+INFO OpenShift file "redis-replica-service.yaml" created
 INFO OpenShift file "frontend-deploymentconfig.yaml" created
 INFO OpenShift file "frontend-imagestream.yaml" created
-INFO OpenShift file "redis-master-deploymentconfig.yaml" created
-INFO OpenShift file "redis-master-imagestream.yaml" created
-INFO OpenShift file "redis-slave-deploymentconfig.yaml" created
-INFO OpenShift file "redis-slave-imagestream.yaml" created
+INFO OpenShift file "redis-leader-deploymentconfig.yaml" created
+INFO OpenShift file "redis-leader-imagestream.yaml" created
+INFO OpenShift file "redis-replica-deploymentconfig.yaml" created
+INFO OpenShift file "redis-replica-imagestream.yaml" created
 ```
 
 Then you can use `kubectl apply` to create these resources in OpenShift cluster.
@@ -188,7 +188,7 @@ Opening the OpenShift Web console in the default browser...
 
 ## RHEL and Kompose
 
-In this guide, we'll deploy a sample `docker-compose.yaml` file using both RHEL (Red Hat Enterprise Linux) and OpenShift.
+In this guide, we'll deploy a sample `compose.yaml` file using both RHEL (Red Hat Enterprise Linux) and OpenShift.
 
 Requirements:
 
@@ -254,27 +254,27 @@ Starting local OpenShift cluster using 'kvm' hypervisor...
 ...
 ```
 
-**Download an [example Docker Compose file](https://raw.githubusercontent.com/kubernetes/kompose/main/examples/docker-compose.yaml), or use your own:**
+**Download an [example Compose file](https://raw.githubusercontent.com/kubernetes/kompose/main/examples/compose.yaml), or use your own:**
 
 ```sh
-wget https://raw.githubusercontent.com/kubernetes/kompose/main/examples/docker-compose.yaml
+wget https://raw.githubusercontent.com/kubernetes/kompose/main/examples/compose.yaml
 ```
 
-**Convert your Docker Compose file to OpenShift:**
+**Convert your Compose file to OpenShift:**
 
-Run `kompose convert --provider=openshift` in the same directory as your `docker-compose.yaml` file.
+Run `kompose convert --provider=openshift` in the same directory as your `compose.yaml` file.
 
 ```sh
 $ kompose convert --provider=openshift
 INFO OpenShift file "frontend-service.yaml" created
-INFO OpenShift file "redis-master-service.yaml" created
-INFO OpenShift file "redis-slave-service.yaml" created
+INFO OpenShift file "redis-leader-service.yaml" created
+INFO OpenShift file "redis-replica-service.yaml" created
 INFO OpenShift file "frontend-deploymentconfig.yaml" created
 INFO OpenShift file "frontend-imagestream.yaml" created
-INFO OpenShift file "redis-master-deploymentconfig.yaml" created
-INFO OpenShift file "redis-master-imagestream.yaml" created
-INFO OpenShift file "redis-slave-deploymentconfig.yaml" created
-INFO OpenShift file "redis-slave-imagestream.yaml" created
+INFO OpenShift file "redis-leader-deploymentconfig.yaml" created
+INFO OpenShift file "redis-leader-imagestream.yaml" created
+INFO OpenShift file "redis-replica-deploymentconfig.yaml" created
+INFO OpenShift file "redis-replica-imagestream.yaml" created
 ```
 
 Then you can use `kubectl apply` to create these resources in OpenShift.

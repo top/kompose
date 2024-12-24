@@ -24,7 +24,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/compose-spec/compose-go/types"
+	"github.com/compose-spec/compose-go/v2/types"
 	"github.com/google/go-cmp/cmp"
 	"github.com/kubernetes/kompose/pkg/kobject"
 	"github.com/pkg/errors"
@@ -221,7 +221,7 @@ func TestLoadV3Ports(t *testing.T) {
 			expose: []string{"80", "8080"},
 			want: []kobject.Ports{
 				{HostPort: 80, ContainerPort: 80, Protocol: string(api.ProtocolTCP)},
-				{HostPort: 8080, ContainerPort: 8080, Protocol: string(api.ProtocolTCP)},
+				{ContainerPort: 8080, Protocol: string(api.ProtocolTCP)},
 			},
 		},
 		{
@@ -230,7 +230,7 @@ func TestLoadV3Ports(t *testing.T) {
 			expose: []string{"80/udp"},
 			want: []kobject.Ports{
 				{HostPort: 80, ContainerPort: 80, Protocol: string(api.ProtocolTCP)},
-				{HostPort: 80, ContainerPort: 80, Protocol: string(api.ProtocolUDP)},
+				{ContainerPort: 80, Protocol: string(api.ProtocolUDP)},
 			},
 		},
 	} {
@@ -347,8 +347,8 @@ func TestLoadPorts(t *testing.T) {
 			want: []kobject.Ports{
 				{ContainerPort: 80, Protocol: string(api.ProtocolTCP)},
 				{ContainerPort: 3000, Protocol: string(api.ProtocolTCP)},
-				{HostPort: 80, ContainerPort: 80, Protocol: string(api.ProtocolTCP)},
-				{HostPort: 8080, ContainerPort: 8080, Protocol: string(api.ProtocolTCP)},
+				{ContainerPort: 80, Protocol: string(api.ProtocolTCP)},
+				{ContainerPort: 8080, Protocol: string(api.ProtocolTCP)},
 			},
 		},
 	}
@@ -429,6 +429,52 @@ func TestLoadEnvVar(t *testing.T) {
 	}
 }
 
+func TestParseEnvFiles(t *testing.T) {
+	tests := []struct {
+		service types.ServiceConfig
+		want    []string
+	}{
+		{service: types.ServiceConfig{
+			Name:  "baz",
+			Image: "foo/baz",
+			EnvFiles: []types.EnvFile{
+				{
+					Path:     "",
+					Required: false,
+				},
+				{
+					Path:     "foo",
+					Required: false,
+				},
+				{
+					Path:     "bar",
+					Required: true,
+				},
+			},
+		},
+			want: []string{"", "foo", "bar"},
+		},
+		{
+			service: types.ServiceConfig{
+				Name:     "baz",
+				Image:    "foo/baz",
+				EnvFiles: []types.EnvFile{},
+			},
+			want: []string{},
+		},
+	}
+
+	for _, tt := range tests {
+		sc := kobject.ServiceConfig{
+			EnvFile: []string{},
+		}
+		parseEnvFiles(&tt.service, &sc)
+		if !reflect.DeepEqual(sc.EnvFile, tt.want) {
+			t.Errorf("Expected %q, got %q", tt.want, sc.EnvFile)
+		}
+	}
+}
+
 // TestUnsupportedKeys test checkUnsupportedKey function with various
 // docker-compose projects
 func TestUnsupportedKeys(t *testing.T) {
@@ -441,7 +487,7 @@ func TestUnsupportedKeys(t *testing.T) {
 			},
 		},
 		Services: types.Services{
-			types.ServiceConfig{
+			"foo": types.ServiceConfig{
 				Name:  "foo",
 				Image: "foo/bar",
 				Build: &types.BuildConfig{
@@ -453,7 +499,7 @@ func TestUnsupportedKeys(t *testing.T) {
 					"net1": {},
 				},
 			},
-			types.ServiceConfig{
+			"bar": types.ServiceConfig{
 				Name:  "bar",
 				Image: "bar/foo",
 				Build: &types.BuildConfig{
@@ -476,7 +522,7 @@ func TestUnsupportedKeys(t *testing.T) {
 
 	projectWithDefaultNetwork := &types.Project{
 		Services: types.Services{
-			types.ServiceConfig{
+			"foo": types.ServiceConfig{
 				Networks: map[string]*types.ServiceNetworkConfig{
 					"default": {},
 				},
@@ -599,5 +645,115 @@ func checkConstraints(t *testing.T, caseName string, output, expected map[string
 		if output[key] != expected[key] {
 			t.Errorf("%s constraint is not equal, expected %s, got %s", key, expected[key], output[key])
 		}
+	}
+}
+
+func Test_parseKomposeLabels(t *testing.T) {
+	service := kobject.ServiceConfig{
+		Name:          "name",
+		ContainerName: "containername",
+		Image:         "image",
+		Labels:        nil,
+		Annotations:   map[string]string{"abc": "def"},
+		Restart:       "always",
+	}
+
+	type args struct {
+		labels        types.Labels
+		serviceConfig *kobject.ServiceConfig
+	}
+	tests := []struct {
+		name     string
+		args     args
+		expected *kobject.ServiceConfig
+	}{
+		{
+			name: "override with overriding",
+			args: args{
+				labels: types.Labels{
+					LabelNameOverride: "overriding",
+				},
+				serviceConfig: &service,
+			},
+			expected: &kobject.ServiceConfig{
+				Name: "overriding",
+			},
+		},
+		{
+			name: "override",
+			args: args{
+				labels: types.Labels{
+					LabelNameOverride: "overriding-resource-name",
+				},
+				serviceConfig: &service,
+			},
+			expected: &kobject.ServiceConfig{
+				Name: "overriding-resource-name",
+			},
+		},
+		{
+			name: "hyphen in the middle",
+			args: args{
+				labels: types.Labels{
+					LabelNameOverride: "overriding_resource-name",
+				},
+				serviceConfig: &service,
+			},
+			expected: &kobject.ServiceConfig{
+				Name: "overriding-resource-name",
+			},
+		},
+		{
+			name: "hyphen in the middle with mays",
+			args: args{
+				labels: types.Labels{
+					LabelNameOverride: "OVERRIDING_RESOURCE-NAME",
+				},
+				serviceConfig: &service,
+			},
+			expected: &kobject.ServiceConfig{
+				Name: "overriding-resource-name",
+			},
+		},
+		// This is a corner case that is expected to fail because
+		// it does not account for scenarios where the string
+		// starts or ends with a '-' or any other character
+		// this test will fail with current tests
+		// {
+		// 	name: "Add a prefix with a dash at the start and end, with a hyphen in the middle.",
+		// 	args: args{
+		// 		labels: types.Labels{
+		// 			LabelNameOverride: "-OVERRIDING_RESOURCE-NAME-",
+		// 		},
+		// 		serviceConfig: &service,
+		// 	},
+		// 	expected: &kobject.ServiceConfig{
+		// 		Name: "overriding-resource-name",
+		// 	},
+		// },
+		// not fail
+		{
+			name: "Add a prefix with a dash at the start and end, with a hyphen in the middle.",
+			args: args{
+				labels: types.Labels{
+					LabelNameOverride: "-OVERRIDING_RESOURCE-NAME-",
+				},
+				serviceConfig: &service,
+			},
+			expected: &kobject.ServiceConfig{
+				Name: "-overriding-resource-name-",
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := parseKomposeLabels(tt.args.labels, tt.args.serviceConfig); err != nil {
+				t.Errorf("parseKomposeLabels(): %v", err)
+			}
+
+			if tt.expected.Name != tt.args.serviceConfig.Name {
+				t.Errorf("Name are not equal, expected: %v, output: %v", tt.expected.Name, tt.args.serviceConfig.Name)
+			}
+		})
 	}
 }

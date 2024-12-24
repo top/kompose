@@ -2,9 +2,6 @@
 apiVersion: apps.openshift.io/v1
 kind: DeploymentConfig
 metadata:
-  annotations:
-    kompose.security-context.fsgroup: "1001"
-  creationTimestamp: null
   labels:
     io.kompose.service: pgadmin
   name: pgadmin
@@ -13,13 +10,10 @@ spec:
   selector:
     io.kompose.service: pgadmin
   strategy:
-    resources: {}
     type: Recreate
   template:
     metadata:
-      creationTimestamp: null
       labels:
-        io.kompose.network/fsgroup-default: "true"
         io.kompose.service: pgadmin
     spec:
       containers:
@@ -30,7 +24,6 @@ spec:
               value: pgadmin_password
           image: ' '
           name: pgadmin
-          resources: {}
           volumeMounts:
             - mountPath: /var/lib/pgadmin
               name: pgadmin-data
@@ -52,19 +45,11 @@ spec:
           kind: ImageStreamTag
           name: pgadmin:latest
       type: ImageChange
-status:
-  availableReplicas: 0
-  latestVersion: 0
-  observedGeneration: 0
-  replicas: 0
-  unavailableReplicas: 0
-  updatedReplicas: 0
 
 ---
 apiVersion: image.openshift.io/v1
 kind: ImageStream
 metadata:
-  creationTimestamp: null
   labels:
     io.kompose.service: pgadmin
   name: pgadmin
@@ -72,23 +57,17 @@ spec:
   lookupPolicy:
     local: false
   tags:
-    - annotations: null
-      from:
+    - from:
         kind: DockerImage
         name: dpage/pgadmin4
-      generation: null
-      importPolicy: {}
       name: latest
       referencePolicy:
         type: ""
-status:
-  dockerImageRepository: ""
 
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  creationTimestamp: null
   labels:
     io.kompose.service: pgadmin-data
   name: pgadmin-data
@@ -98,4 +77,4 @@ spec:
   resources:
     requests:
       storage: 100Mi
-status: {}
+

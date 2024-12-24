@@ -18,10 +18,12 @@ package app
 
 import (
 	"fmt"
+	"path/filepath"
 	"strings"
 
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
+	"k8s.io/apimachinery/pkg/runtime"
 
 	"os"
 
@@ -143,20 +145,22 @@ func ValidateFlags(args []string, cmd *cobra.Command, opt *kobject.ConvertOption
 }
 
 // ValidateComposeFile validates the compose file provided for conversion
-func ValidateComposeFile(opt *kobject.ConvertOptions) {
+func ValidateComposeFile(opt *kobject.ConvertOptions) error {
 	if len(opt.InputFiles) == 0 {
+		// Go through a range of "default" file names to see if tany ofthem exist in the current directory
 		for _, name := range DefaultComposeFiles {
 			_, err := os.Stat(name)
 			if err != nil {
 				log.Debugf("'%s' not found: %v", name, err)
 			} else {
 				opt.InputFiles = []string{name}
-				return
+				return nil
 			}
 		}
-
-		log.Fatal("No 'docker-compose' file found")
+		// Return an error message that no compose or docker-compose yaml files were found
+		return fmt.Errorf("No compose or docker-compose yaml file found in the current directory")
 	}
+	return nil
 }
 
 func validateControllers(opt *kobject.ConvertOptions) {
@@ -202,7 +206,7 @@ func validateControllers(opt *kobject.ConvertOptions) {
 }
 
 // Convert transforms docker compose or dab file to k8s objects
-func Convert(opt kobject.ConvertOptions) {
+func Convert(opt kobject.ConvertOptions) ([]runtime.Object, error) {
 	validateControllers(&opt)
 
 	// loader parses input from file into komposeObject.
@@ -214,9 +218,36 @@ func Convert(opt kobject.ConvertOptions) {
 	komposeObject := kobject.KomposeObject{
 		ServiceConfigs: make(map[string]kobject.ServiceConfig),
 	}
-	komposeObject, err = l.LoadFile(opt.InputFiles)
+	komposeObject, err = l.LoadFile(opt.InputFiles, opt.Profiles)
 	if err != nil {
 		log.Fatalf(err.Error())
+	}
+
+	komposeObject.Namespace = opt.Namespace
+
+	// Get the directory of the compose file
+	workDir, err := transformer.GetComposeFileDir(opt.InputFiles)
+	if err != nil {
+		log.Fatalf("Unable to get compose file directory: %s", err)
+	}
+
+	// convert env_file from absolute to relative path
+	for _, service := range komposeObject.ServiceConfigs {
+		if len(service.EnvFile) <= 0 {
+			continue
+		}
+		for i, envFile := range service.EnvFile {
+			if !filepath.IsAbs(envFile) {
+				continue
+			}
+
+			relPath, err := filepath.Rel(workDir, envFile)
+			if err != nil {
+				log.Fatalf(err.Error())
+			}
+
+			service.EnvFile[i] = filepath.ToSlash(relPath)
+		}
 	}
 
 	// Get a transformer that maps komposeObject to provider's primitives
@@ -234,6 +265,7 @@ func Convert(opt kobject.ConvertOptions) {
 	if err != nil {
 		log.Fatalf(err.Error())
 	}
+	return objects, err
 }
 
 // Convenience method to return the appropriate Transformer based on

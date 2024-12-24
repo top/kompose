@@ -46,18 +46,23 @@ var (
 	ConvertDeploymentConfig      bool
 	ConvertReplicas              int
 	ConvertController            string
+	ConvertProfiles              []string
 	ConvertPushImage             bool
+	ConvertNamespace             string
 	ConvertPushImageRegistry     string
 	ConvertOpt                   kobject.ConvertOptions
 	ConvertYAMLIndent            int
+	GenerateNetworkPolicies      bool
 
 	UpBuild string
 
+	BuildCommand string
+	PushCommand  string
 	// WithKomposeAnnotation decides if we will add metadata about this convert to resource's annotation.
 	// default is true.
 	WithKomposeAnnotation bool
 
-	// MultipleContainerMode which enables creating multi containers in a single pod is a developping function.
+	// MultipleContainerMode which enables creating multi containers in a single pod is a developing function.
 	// default is false
 	MultipleContainerMode bool
 
@@ -73,7 +78,10 @@ var (
 
 var convertCmd = &cobra.Command{
 	Use:   "convert",
-	Short: "Convert a Docker Compose file",
+	Short: "Convert a Compose file",
+	Example: `  kompose --file compose.yaml convert
+  kompose -f first.yaml -f second.yaml convert
+  kompose --provider openshift --file compose.yaml convert`,
 	PreRun: func(cmd *cobra.Command, args []string) {
 
 		// Check that build-config wasn't passed in with --provider=kubernetes
@@ -111,11 +119,16 @@ var convertCmd = &cobra.Command{
 			IsReplicaSetFlag:            cmd.Flags().Lookup("replicas").Changed,
 			IsDeploymentConfigFlag:      cmd.Flags().Lookup("deployment-config").Changed,
 			YAMLIndent:                  ConvertYAMLIndent,
+			Profiles:                    ConvertProfiles,
 			WithKomposeAnnotation:       WithKomposeAnnotation,
 			MultipleContainerMode:       MultipleContainerMode,
 			ServiceGroupMode:            ServiceGroupMode,
 			ServiceGroupName:            ServiceGroupName,
 			SecretsAsFiles:              SecretsAsFiles,
+			GenerateNetworkPolicies:     GenerateNetworkPolicies,
+			BuildCommand:                BuildCommand,
+			PushCommand:                 PushCommand,
+			Namespace:                   ConvertNamespace,
 		}
 
 		if ServiceGroupMode == "" && MultipleContainerMode {
@@ -123,7 +136,12 @@ var convertCmd = &cobra.Command{
 		}
 
 		app.ValidateFlags(args, cmd, &ConvertOpt)
-		app.ValidateComposeFile(&ConvertOpt)
+
+		// Since ValidateComposeFiles returns an error, let's validate it and output the error appropriately if the validation fails
+		err := app.ValidateComposeFile(&ConvertOpt)
+		if err != nil {
+			log.Fatalf("Error validating compose file: %v", err)
+		}
 	},
 	Run: func(cmd *cobra.Command, args []string) {
 
@@ -152,7 +170,7 @@ func init() {
 	convertCmd.Flags().StringVar(&ServiceGroupMode, "service-group-mode", "", "Group multiple service to create single workload by `label`(`kompose.service.group`) or `volume`(shared volumes)")
 	convertCmd.Flags().StringVar(&ServiceGroupName, "service-group-name", "", "Using with --service-group-mode=volume to specific a final service name for the group")
 	convertCmd.Flags().MarkDeprecated("multiple-container-mode", "use --service-group-mode=label")
-	convertCmd.Flags().BoolVar(&SecretsAsFiles, "secrets-as-files", false, "Always convert docker-compose secrets into files instead of symlinked directories.")
+	convertCmd.Flags().BoolVar(&SecretsAsFiles, "secrets-as-files", false, "Always convert docker-compose secrets into files instead of symlinked directories")
 
 	// OpenShift only
 	convertCmd.Flags().BoolVar(&ConvertDeploymentConfig, "deployment-config", true, "Generate an OpenShift deploymentconfig object")
@@ -168,16 +186,20 @@ func init() {
 	// Standard between the two
 	convertCmd.Flags().StringVar(&ConvertBuild, "build", "none", `Set the type of build ("local"|"build-config"(OpenShift only)|"none")`)
 	convertCmd.Flags().BoolVar(&ConvertPushImage, "push-image", false, "If we should push the docker image we built")
-	convertCmd.Flags().StringVar(&ConvertPushImageRegistry, "push-image-registry", "", "Specify registry for pushing image, which will override registry from image name.")
+	convertCmd.Flags().StringVar(&BuildCommand, "build-command", "", `Set the command used to build the container image, which will override the docker build command. Should be used in conjuction with --push-command flag.`)
+	convertCmd.Flags().StringVar(&PushCommand, "push-command", "", `Set the command used to push the container image. override the docker push command. Should be used in conjuction with --build-command flag.`)
+	convertCmd.Flags().StringVar(&ConvertPushImageRegistry, "push-image-registry", "", "Specify registry for pushing image, which will override registry from image name")
 	convertCmd.Flags().BoolVarP(&ConvertYaml, "yaml", "y", false, "Generate resource files into YAML format")
-	convertCmd.Flags().MarkDeprecated("yaml", "YAML is the default format now.")
-	convertCmd.Flags().MarkShorthandDeprecated("y", "YAML is the default format now.")
+	convertCmd.Flags().MarkDeprecated("yaml", "YAML is the default format now")
+	convertCmd.Flags().MarkShorthandDeprecated("y", "YAML is the default format now")
 	convertCmd.Flags().BoolVarP(&ConvertJSON, "json", "j", false, "Generate resource files into JSON format")
 	convertCmd.Flags().BoolVar(&ConvertStdout, "stdout", false, "Print converted objects to stdout")
 	convertCmd.Flags().StringVarP(&ConvertOut, "out", "o", "", "Specify a file name or directory to save objects to (if path does not exist, a file will be created)")
 	convertCmd.Flags().IntVar(&ConvertReplicas, "replicas", 1, "Specify the number of replicas in the generated resource spec")
 	convertCmd.Flags().StringVar(&ConvertVolumes, "volumes", "persistentVolumeClaim", `Volumes to be generated ("persistentVolumeClaim"|"emptyDir"|"hostPath" | "configMap")`)
 	convertCmd.Flags().StringVar(&ConvertPVCRequestSize, "pvc-request-size", "", `Specify the size of pvc storage requests in the generated resource spec`)
+	convertCmd.Flags().StringVarP(&ConvertNamespace, "namespace", "n", "", `Specify the namespace of the generated resources`)
+	convertCmd.Flags().BoolVar(&GenerateNetworkPolicies, "generate-network-policies", false, "Specify whether to generate network policies or not")
 
 	convertCmd.Flags().BoolVar(&WithKomposeAnnotation, "with-kompose-annotation", true, "Add kompose annotations to generated resource")
 
@@ -186,6 +208,8 @@ func init() {
 	convertCmd.Flags().MarkDeprecated("emptyvols", "emptyvols has been marked as deprecated. Use --volumes emptyDir")
 
 	convertCmd.Flags().IntVar(&ConvertYAMLIndent, "indent", 2, "Spaces length to indent generated yaml files")
+
+	convertCmd.Flags().StringArrayVar(&ConvertProfiles, "profile", []string{}, `Specify the profile to use, can use multiple profiles`)
 
 	// In order to 'separate' both OpenShift and Kubernetes only flags. A custom help page is created
 	customHelp := `Usage:{{if .Runnable}}

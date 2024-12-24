@@ -12,7 +12,7 @@ redirect_from:
 * TOC
 {:toc}
 
-This document outlines all possible conversion details regarding `docker-compose.yaml` values to Kubernetes / OpenShift artifacts.
+This document outlines all possible conversion details regarding `compose.yaml` values to Kubernetes / OpenShift artifacts.
 
 ## Version Support
 
@@ -24,7 +24,7 @@ We're doing our best to keep it up to date as soon as possible in our releases t
 **Glossary:**
 
 - **✓:** Converts
-- **-:** Not in this Docker Compose Version
+- **-:** Not in this Compose Version
 - **n:** Not yet implemented
 - **x:** Not applicable / no 1-1 conversion
 
@@ -38,7 +38,7 @@ We're doing our best to keep it up to date as soon as possible in our releases t
 | cap_add                | ✓  | ✓  | ✓  | Container.SecurityContext.Capabilities.Add                           |                                                                                                                                   |
 | cap_drop               | ✓  | ✓  | ✓  | Container.SecurityContext.Capabilities.Drop                          |                                                                                                                                   |
 | command                | ✓  | ✓  | ✓  | Container.Args                                                       |                                                                                                                                   |
-| configs                | n  | n  | ✓  |                                                                      |                                                                                                                                   |
+| configs                | n  | n  | ✓  |                                                                      |                                                                                                                                    |
 | configs: short-syntax  | n  | n  | ✓  |                                                                      | Only create configMap                                                                                                             |
 | configs: long-syntax   | n  | n  | ✓  |                                                                      | If target path is /, ignore this and only create configMap                                                                        |
 | cgroup_parent          | x  | x  | x  |                                                                      | Not supported within Kubernetes. See issue https://github.com/kubernetes/kubernetes/issues/11986                                  |
@@ -90,7 +90,7 @@ We're doing our best to keep it up to date as soon as possible in our releases t
 | stop_signal            | x  | x  | x  |                                                                      | Not supported within Kubernetes. See issue https://github.com/kubernetes/kubernetes/issues/30051                                  |
 | sysctls                | n  | n  | n  |                                                                      |                                                                                                                                   |
 | ulimits                | x  | x  | x  |                                                                      | Not supported within Kubernetes. See issue https://github.com/kubernetes/kubernetes/issues/3595                                   |
-| userns_mode            | x  | x  | x  |                                                                      | Not supported within Kubernetes and ignored in Docker Compose Version 3                                                           |
+| userns_mode            | x  | x  | x  |                                                                      | Not supported within Kubernetes and ignored in Compose Version 3                                                           |
 | volumes                | ✓  | ✓  | ✓  | PersistentVolumeClaim                                                | Creates a PersistentVolumeClaim. Can only be created if there is already a PersistentVolume within the cluster                    |
 | volumes: short-syntax  | ✓  | ✓  | ✓  | PersistentVolumeClaim                                                | Creates a PersistentVolumeClaim. Can only be created if there is already a PersistentVolume within the cluster                    |
 | volumes: long-syntax   | -  | -  | ✓  | PersistentVolumeClaim                                                | Creates a PersistentVolumeClaim. Can only be created if there is already a PersistentVolume within the cluster                    |
@@ -108,5 +108,12 @@ We're doing our best to keep it up to date as soon as possible in our releases t
 | enable_ipv6            | x  | x  | x  |                                                                      |                                                                                                                                   |
 | ipam                   | x  | x  | x  |                                                                      |                                                                                                                                   |
 | internal               | x  | x  | x  |                                                                      |                                                                                                                                   |
+| labels                 | x  | x  | x  |                                                                      |                                                                                                                                   |
+| external               | x  | x  | x  |                                                                      |                                                                                                                                   |
+|                        |    |    |    |                                                                      |                                                                                                                                   |
+| **Configs**            | x  | x  | x  |                                                                      |                                                                                                                                   |
+| environment            | x  | ✓  | ✓  |                                                                      |                                                                                                                                   |
+| file                   | ✓  | ✓  | ✓  |                                                                      |                                                                                                                                   |
+| content                | x  | ✓  | ✓  |                                                                      |                                                                                                                                   |
 | labels                 | x  | x  | x  |                                                                      |                                                                                                                                   |
 | external               | x  | x  | x  |                                                                      |                                                                                                                                   |

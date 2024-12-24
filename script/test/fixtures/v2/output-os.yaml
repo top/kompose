@@ -2,7 +2,6 @@
 apiVersion: v1
 kind: Service
 metadata:
-  creationTimestamp: null
   labels:
     io.kompose.service: foo
   name: foo
@@ -16,9 +15,6 @@ spec:
       protocol: UDP
       targetPort: 6379
     - name: "3000"
-      port: 3000
-      targetPort: 3000
-    - name: 3000-tcp
       port: 3000
       targetPort: 3000
     - name: "3001"
@@ -86,16 +82,11 @@ spec:
       targetPort: 5010
   selector:
     io.kompose.service: foo
-status:
-  loadBalancer: {}
 
 ---
 apiVersion: v1
 kind: Service
 metadata:
-  annotations:
-    kompose.service.type: loadbalancer
-  creationTimestamp: null
   labels:
     io.kompose.service: redis-tcp
   name: redis-tcp
@@ -107,16 +98,11 @@ spec:
   selector:
     io.kompose.service: redis
   type: LoadBalancer
-status:
-  loadBalancer: {}
 
 ---
 apiVersion: v1
 kind: Service
 metadata:
-  annotations:
-    kompose.service.type: loadbalancer
-  creationTimestamp: null
   labels:
     io.kompose.service: redis-udp
   name: redis-udp
@@ -129,16 +115,12 @@ spec:
   selector:
     io.kompose.service: redis
   type: LoadBalancer
-status:
-  loadBalancer: {}
 
 ---
 apiVersion: v1
 kind: Pod
 metadata:
-  creationTimestamp: null
   labels:
-    io.kompose.network/v2-default: "true"
     io.kompose.service: foo
   name: foo
 spec:
@@ -166,64 +148,36 @@ spec:
         - containerPort: 3005
           protocol: TCP
         - containerPort: 8000
-          hostPort: 8000
           protocol: TCP
         - containerPort: 8080
-          hostPort: 9090
           protocol: TCP
         - containerPort: 8081
-          hostPort: 9091
           protocol: TCP
         - containerPort: 22
-          hostPort: 49100
           protocol: TCP
         - containerPort: 8001
-          hostIP: 127.0.0.1
-          hostPort: 8001
           protocol: TCP
         - containerPort: 5000
-          hostIP: 127.0.0.1
-          hostPort: 5000
           protocol: TCP
         - containerPort: 5001
-          hostIP: 127.0.0.1
-          hostPort: 5001
           protocol: TCP
         - containerPort: 5002
-          hostIP: 127.0.0.1
-          hostPort: 5002
           protocol: TCP
         - containerPort: 5003
-          hostIP: 127.0.0.1
-          hostPort: 5003
           protocol: TCP
         - containerPort: 5004
-          hostIP: 127.0.0.1
-          hostPort: 5004
           protocol: TCP
         - containerPort: 5005
-          hostIP: 127.0.0.1
-          hostPort: 5005
           protocol: TCP
         - containerPort: 5006
-          hostIP: 127.0.0.1
-          hostPort: 5006
           protocol: TCP
         - containerPort: 5007
-          hostIP: 127.0.0.1
-          hostPort: 5007
           protocol: TCP
         - containerPort: 5008
-          hostIP: 127.0.0.1
-          hostPort: 5008
           protocol: TCP
         - containerPort: 5009
-          hostIP: 127.0.0.1
-          hostPort: 5009
           protocol: TCP
         - containerPort: 5010
-          hostIP: 127.0.0.1
-          hostPort: 5010
           protocol: TCP
       resources:
         limits:
@@ -232,15 +186,11 @@ spec:
   securityContext:
     supplementalGroups:
       - 1234
-status: {}
 
 ---
-apiVersion: v1
+apiVersion: apps.openshift.io/v1
 kind: DeploymentConfig
 metadata:
-  annotations:
-    kompose.service.type: loadbalancer
-  creationTimestamp: null
   labels:
     io.kompose.service: redis
   name: redis
@@ -248,13 +198,9 @@ spec:
   replicas: 1
   selector:
     io.kompose.service: redis
-  strategy:
-    resources: {}
   template:
     metadata:
-      creationTimestamp: null
       labels:
-        io.kompose.network/v2-default: "true"
         io.kompose.service: redis
     spec:
       containers:
@@ -264,7 +210,6 @@ spec:
             - containerPort: 6379
               protocol: TCP
             - containerPort: 1235
-              hostPort: 1234
               protocol: UDP
           resources:
             limits:
@@ -281,19 +226,11 @@ spec:
           kind: ImageStreamTag
           name: redis:3.0
       type: ImageChange
-status:
-  availableReplicas: 0
-  latestVersion: 0
-  observedGeneration: 0
-  replicas: 0
-  unavailableReplicas: 0
-  updatedReplicas: 0
 
 ---
-apiVersion: v1
+apiVersion: image.openshift.io/v1
 kind: ImageStream
 metadata:
-  creationTimestamp: null
   labels:
     io.kompose.service: redis
   name: redis
@@ -301,15 +238,10 @@ spec:
   lookupPolicy:
     local: false
   tags:
-    - annotations: null
-      from:
+    - from:
         kind: DockerImage
         name: redis:3.0
-      generation: null
-      importPolicy: {}
       name: "3.0"
       referencePolicy:
         type: ""
-status:
-  dockerImageRepository: ""
 

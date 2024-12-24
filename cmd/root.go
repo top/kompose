@@ -21,6 +21,8 @@ import (
 
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
+	"github.com/spf13/viper"
 )
 
 // Logrus hooks
@@ -48,9 +50,13 @@ var (
 
 // RootCmd root level flags and commands
 var RootCmd = &cobra.Command{
-	Use:           "kompose",
-	Short:         "A tool helping Docker Compose users move to Kubernetes",
-	Long:          `Kompose is a tool to help users who are familiar with docker-compose move to Kubernetes.`,
+	Use:   "kompose",
+	Short: "A tool helping Compose users move to Kubernetes",
+	Long:  `Kompose is a tool to help users who are familiar with docker-compose move to Kubernetes.`,
+	Example: `  kompose --file compose.yaml convert
+  kompose -f first.yaml -f second.yaml convert
+  kompose --provider openshift --file compose.yaml convert
+  kompose completion bash`,
 	SilenceErrors: true,
 	// PersistentPreRun will be "inherited" by all children and ran before *every* command unless
 	// the child has overridden the functionality. This functionality was implemented to check / modify
@@ -80,11 +86,21 @@ var RootCmd = &cobra.Command{
 		if provider != "kubernetes" && provider != "openshift" {
 			log.Fatalf("%s is an unsupported provider. Supported providers are: 'kubernetes', 'openshift'.", GlobalProvider)
 		}
+
+		v := viper.New()
+		v.BindEnv("file", "COMPOSE_FILE")
+
+		cmd.Flags().VisitAll(func(f *pflag.Flag) {
+			configName := f.Name
+			if configName == "file" && !f.Changed && v.IsSet(configName) {
+				GlobalFiles = v.GetStringSlice(configName)
+			}
+		})
 	},
 }
 
 // Execute executes the root level command.
-// It returns an erorr if any.
+// It returns an error if any.
 func Execute() error {
 	return RootCmd.Execute()
 }
@@ -93,6 +109,6 @@ func init() {
 	RootCmd.PersistentFlags().BoolVarP(&GlobalVerbose, "verbose", "v", false, "verbose output")
 	RootCmd.PersistentFlags().BoolVar(&GlobalSuppressWarnings, "suppress-warnings", false, "Suppress all warnings")
 	RootCmd.PersistentFlags().BoolVar(&GlobalErrorOnWarning, "error-on-warning", false, "Treat any warning as an error")
-	RootCmd.PersistentFlags().StringArrayVarP(&GlobalFiles, "file", "f", []string{}, "Specify an alternative compose file")
+	RootCmd.PersistentFlags().StringSliceVarP(&GlobalFiles, "file", "f", []string{}, "Specify an alternative compose file")
 	RootCmd.PersistentFlags().StringVar(&GlobalProvider, "provider", "kubernetes", "Specify a provider. Kubernetes or OpenShift.")
 }

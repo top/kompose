@@ -2,9 +2,6 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  annotations:
-    kompose.security-context.fsgroup: "1001"
-  creationTimestamp: null
   labels:
     io.kompose.service: pgadmin
   name: pgadmin
@@ -17,11 +14,7 @@ spec:
     type: Recreate
   template:
     metadata:
-      annotations:
-        kompose.security-context.fsgroup: "1001"
-      creationTimestamp: null
       labels:
-        io.kompose.network/fsgroup-default: "true"
         io.kompose.service: pgadmin
     spec:
       containers:
@@ -32,7 +25,6 @@ spec:
               value: pgadmin_password
           image: dpage/pgadmin4
           name: pgadmin
-          resources: {}
           volumeMounts:
             - mountPath: /var/lib/pgadmin
               name: pgadmin-data
@@ -43,13 +35,11 @@ spec:
         - name: pgadmin-data
           persistentVolumeClaim:
             claimName: pgadmin-data
-status: {}
 
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  creationTimestamp: null
   labels:
     io.kompose.service: pgadmin-data
   name: pgadmin-data
@@ -59,21 +49,4 @@ spec:
   resources:
     requests:
       storage: 100Mi
-status: {}
-
----
-apiVersion: networking.k8s.io/v1
-kind: NetworkPolicy
-metadata:
-  creationTimestamp: null
-  name: fsgroup-default
-spec:
-  ingress:
-    - from:
-        - podSelector:
-            matchLabels:
-              io.kompose.network/fsgroup-default: "true"
-  podSelector:
-    matchLabels:
-      io.kompose.network/fsgroup-default: "true"
 

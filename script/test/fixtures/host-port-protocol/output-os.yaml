@@ -2,7 +2,6 @@
 apiVersion: v1
 kind: Service
 metadata:
-  creationTimestamp: null
   labels:
     io.kompose.service: nginx
   name: nginx
@@ -13,14 +12,11 @@ spec:
       targetPort: 80
   selector:
     io.kompose.service: nginx
-status:
-  loadBalancer: {}
 
 ---
 apiVersion: apps.openshift.io/v1
 kind: DeploymentConfig
 metadata:
-  creationTimestamp: null
   labels:
     io.kompose.service: nginx
   name: nginx
@@ -28,13 +24,9 @@ spec:
   replicas: 1
   selector:
     io.kompose.service: nginx
-  strategy:
-    resources: {}
   template:
     metadata:
-      creationTimestamp: null
       labels:
-        io.kompose.network/host-port-protocol-default: "true"
         io.kompose.service: nginx
     spec:
       containers:
@@ -42,9 +34,7 @@ spec:
           name: nginx
           ports:
             - containerPort: 80
-              hostPort: 80
               protocol: TCP
-          resources: {}
       restartPolicy: Always
   test: false
   triggers:
@@ -57,19 +47,11 @@ spec:
           kind: ImageStreamTag
           name: nginx:latest
       type: ImageChange
-status:
-  availableReplicas: 0
-  latestVersion: 0
-  observedGeneration: 0
-  replicas: 0
-  unavailableReplicas: 0
-  updatedReplicas: 0
 
 ---
 apiVersion: image.openshift.io/v1
 kind: ImageStream
 metadata:
-  creationTimestamp: null
   labels:
     io.kompose.service: nginx
   name: nginx
@@ -77,15 +59,10 @@ spec:
   lookupPolicy:
     local: false
   tags:
-    - annotations: null
-      from:
+    - from:
         kind: DockerImage
         name: nginx
-      generation: null
-      importPolicy: {}
       name: latest
       referencePolicy:
         type: ""
-status:
-  dockerImageRepository: ""
 

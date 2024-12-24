@@ -20,6 +20,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"os"
+	"os/exec"
 	"path"
 	"path/filepath"
 	"reflect"
@@ -28,11 +29,12 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/compose-spec/compose-go/types"
+	"github.com/compose-spec/compose-go/v2/types"
 	"github.com/fatih/structs"
 	"github.com/kubernetes/kompose/pkg/kobject"
 	"github.com/kubernetes/kompose/pkg/loader/compose"
 	"github.com/kubernetes/kompose/pkg/transformer"
+	"github.com/mattn/go-shellwords"
 	deployapi "github.com/openshift/api/apps/v1"
 	buildapi "github.com/openshift/api/build/v1"
 	"github.com/pkg/errors"
@@ -40,6 +42,7 @@ import (
 	"github.com/spf13/cast"
 	"golang.org/x/tools/godoc/util"
 	appsv1 "k8s.io/api/apps/v1"
+	batchv1 "k8s.io/api/batch/v1"
 	api "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -218,14 +221,18 @@ func (k *Kubernetes) InitSvc(name string, service kobject.ServiceConfig) *api.Se
 
 // InitConfigMapForEnv initializes a ConfigMap object
 func (k *Kubernetes) InitConfigMapForEnv(name string, opt kobject.ConvertOptions, envFile string) *api.ConfigMap {
-	envs, err := GetEnvsFromFile(envFile, opt)
+	workDir, err := transformer.GetComposeFileDir(opt.InputFiles)
+	if err != nil {
+		log.Fatalf("Unable to get compose file directory: %s", err)
+	}
+	envs, err := GetEnvsFromFile(filepath.Join(workDir, envFile))
 	if err != nil {
 		log.Fatalf("Unable to retrieve env file: %s", err)
 	}
 
 	// Remove root pathing
 	// replace all other slashes / periods
-	envName := FormatEnvName(envFile)
+	envName := FormatEnvName(envFile, name)
 
 	// In order to differentiate files, we append to the name and remove '.env' if applicable from the file name
 	configMap := &api.ConfigMap{
@@ -312,9 +319,10 @@ func initConfigMapData(configMap *api.ConfigMap, data map[string]string) {
 	binData := map[string][]byte{}
 
 	for k, v := range data {
-		isText := util.IsText([]byte(v))
+		lfText := strings.Replace(v, "\r\n", "\n", -1)
+		isText := util.IsText([]byte(lfText))
 		if isText {
-			stringData[k] = v
+			stringData[k] = lfText
 		} else {
 			binData[k] = []byte(base64.StdEncoding.EncodeToString([]byte(v)))
 		}
@@ -322,6 +330,24 @@ func initConfigMapData(configMap *api.ConfigMap, data map[string]string) {
 
 	configMap.Data = stringData
 	configMap.BinaryData = binData
+}
+
+// InitConfigMapFromContent initializes a ConfigMap object
+func (k *Kubernetes) InitConfigMapFromContent(name string, service kobject.ServiceConfig, content string, currentConfigName string, target string) *api.ConfigMap {
+	configMap := &api.ConfigMap{
+		TypeMeta: metav1.TypeMeta{
+			Kind:       "ConfigMap",
+			APIVersion: "v1",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:   currentConfigName,
+			Labels: transformer.ConfigLabels(name),
+		},
+	}
+	filename := GetFileName(target)
+	data := map[string]string{filename: content}
+	initConfigMapData(configMap, data)
+	return configMap
 }
 
 // InitConfigMapFromFile initializes a ConfigMap object
@@ -464,6 +490,33 @@ func (k *Kubernetes) InitSS(name string, service kobject.ServiceConfig, replicas
 	return ds
 }
 
+// InitCJ initializes Kubernetes CronJob object
+func (k *Kubernetes) InitCJ(name string, service kobject.ServiceConfig, schedule string, concurrencyPolicy batchv1.ConcurrencyPolicy, backoffLimit *int32) *batchv1.CronJob {
+	cj := &batchv1.CronJob{
+		TypeMeta: metav1.TypeMeta{
+			Kind:       "CronJob",
+			APIVersion: "batch/v1",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:   name,
+			Labels: transformer.ConfigAllLabels(name, &service),
+		},
+		Spec: batchv1.CronJobSpec{
+			Schedule:          schedule,
+			ConcurrencyPolicy: concurrencyPolicy,
+			JobTemplate: batchv1.JobTemplateSpec{
+				Spec: batchv1.JobSpec{
+					BackoffLimit: backoffLimit,
+					Template: api.PodTemplateSpec{
+						Spec: k.InitPodSpec(name, service.Image, service.ImagePullSecret),
+					},
+				},
+			},
+		},
+	}
+	return cj
+}
+
 func (k *Kubernetes) initIngress(name string, service kobject.ServiceConfig, port int32) *networkingv1.Ingress {
 	hosts := regexp.MustCompile("[ ,]*,[ ,]*").Split(service.ExposeService, -1)
 
@@ -548,17 +601,18 @@ func (k *Kubernetes) CreateSecrets(komposeObject kobject.KomposeObject) ([]*api.
 				return nil, err
 			}
 			data := []byte(dataString)
+			resourceName := FormatResourceName(name)
 			secret := &api.Secret{
 				TypeMeta: metav1.TypeMeta{
 					Kind:       "Secret",
 					APIVersion: "v1",
 				},
 				ObjectMeta: metav1.ObjectMeta{
-					Name:   FormatResourceName(name),
-					Labels: transformer.ConfigLabels(name),
+					Name:   resourceName,
+					Labels: transformer.ConfigLabels(resourceName),
 				},
 				Type: api.SecretTypeOpaque,
-				Data: map[string][]byte{name: data},
+				Data: map[string][]byte{resourceName: data},
 			}
 			objects = append(objects, secret)
 		} else {
@@ -581,11 +635,11 @@ func (k *Kubernetes) CreatePVC(name string, mode string, size string, selectorVa
 			APIVersion: "v1",
 		},
 		ObjectMeta: metav1.ObjectMeta{
-			Name:   name,
+			Name:   FormatResourceName(name),
 			Labels: transformer.ConfigLabels(name),
 		},
 		Spec: api.PersistentVolumeClaimSpec{
-			Resources: api.ResourceRequirements{
+			Resources: api.VolumeResourceRequirements{
 				Requests: api.ResourceList{
 					api.ResourceStorage: volSize,
 				},
@@ -599,11 +653,7 @@ func (k *Kubernetes) CreatePVC(name string, mode string, size string, selectorVa
 		}
 	}
 
-	if mode == "ro" {
-		pvc.Spec.AccessModes = []api.PersistentVolumeAccessMode{api.ReadOnlyMany}
-	} else {
-		pvc.Spec.AccessModes = []api.PersistentVolumeAccessMode{api.ReadWriteOnce}
-	}
+	pvc.Spec.AccessModes = setVolumeAccessMode(mode, pvc.Spec.AccessModes)
 
 	if len(storageClassName) > 0 {
 		pvc.Spec.StorageClassName = &storageClassName
@@ -622,9 +672,12 @@ func ConfigPorts(service kobject.ServiceConfig) []api.ContainerPort {
 		}
 		containerPort := api.ContainerPort{
 			ContainerPort: port.ContainerPort,
-			HostIP:        port.HostIP,
-			HostPort:      port.HostPort,
 			Protocol:      api.Protocol(port.Protocol),
+		}
+
+		if service.ExposeContainerToHost {
+			containerPort.HostIP = port.HostIP
+			containerPort.HostPort = port.HostPort
 		}
 		ports = append(ports, containerPort)
 		exist[port.ID()] = true
@@ -765,6 +818,7 @@ func (k *Kubernetes) ConfigSecretVolumes(name string, service kobject.ServiceCon
 	var volumes []api.Volume
 	if len(service.Secrets) > 0 {
 		for _, secretConfig := range service.Secrets {
+			secretConfig := reformatSecretConfigUnderscoreWithDash(secretConfig)
 			if secretConfig.UID != "" {
 				log.Warnf("Ignore pid in secrets for service: %s", name)
 			}
@@ -876,8 +930,8 @@ func (k *Kubernetes) getSecretPathsLegacy(secretConfig types.ServiceSecretConfig
 		itemPath = lastPart
 	}
 
-	secretSubPath = "" // We didn't set a SubPath in legacy behavior
-	return itemPath, mountPath, ""
+	secretSubPath = itemPath //"" // We didn't set a SubPath in legacy behavior
+	return itemPath, mountPath, secretSubPath
 }
 
 // ConfigVolumes configure the container volumes.
@@ -887,6 +941,7 @@ func (k *Kubernetes) ConfigVolumes(name string, service kobject.ServiceConfig) (
 	var PVCs []*api.PersistentVolumeClaim
 	var cms []*api.ConfigMap
 	var volumeName string
+	var subpathName string
 
 	// Set a var based on if the user wants to use empty volumes
 	// as opposed to persistent volumes and volume claims
@@ -895,6 +950,10 @@ func (k *Kubernetes) ConfigVolumes(name string, service kobject.ServiceConfig) (
 	useConfigMap := k.Opt.Volumes == "configMap"
 	if k.Opt.Volumes == "emptyDir" {
 		useEmptyVolumes = true
+	}
+
+	if subpath, ok := service.Labels["kompose.volume.subpath"]; ok {
+		subpathName = subpath
 	}
 
 	// Override volume type if specified in service labels.
@@ -913,10 +972,22 @@ func (k *Kubernetes) ConfigVolumes(name string, service kobject.ServiceConfig) (
 	volumes = append(volumes, secretsVolumes...)
 
 	var count int
+	skip := false
 	//iterating over array of `Vols` struct as it contains all necessary information about volumes
 	for _, volume := range service.Volumes {
 		// check if ro/rw mode is defined, default rw
-		readonly := len(volume.Mode) > 0 && volume.Mode == "ro"
+		readonly := len(volume.Mode) > 0 && (volume.Mode == "ro" || volume.Mode == "rox")
+		mountHost := volume.Host
+		if mountHost == "" {
+			mountHost = volume.MountPath
+		}
+		// return useconfigmap and readonly,
+		// not used asigned readonly because dont break e2e
+		useConfigMap, _, skip = isConfigFile(mountHost)
+		if skip {
+			log.Warnf("Skip file in path %s ", volume.Host)
+			continue
+		}
 		if volume.VolumeName == "" {
 			if useEmptyVolumes {
 				volumeName = strings.Replace(volume.PVCName, "claim", "empty", 1)
@@ -992,6 +1063,9 @@ func (k *Kubernetes) ConfigVolumes(name string, service kobject.ServiceConfig) (
 
 				PVCs = append(PVCs, createdPVC)
 			}
+		}
+		if subpathName != "" {
+			volMount.SubPath = subpathName
 		}
 		volumeMounts = append(volumeMounts, volMount)
 
@@ -1089,12 +1163,15 @@ func ConfigEnvs(service kobject.ServiceConfig, opt kobject.ConvertOptions) ([]ap
 
 	if len(service.EnvFile) > 0 {
 		// Load each env_file
-
 		for _, file := range service.EnvFile {
-			envName := FormatEnvName(file)
+			envName := FormatEnvName(file, service.Name)
 
 			// Load environment variables from file
-			envLoad, err := GetEnvsFromFile(file, opt)
+			workDir, err := transformer.GetComposeFileDir(opt.InputFiles)
+			if err != nil {
+				log.Fatalf("Unable to get compose file directory: %s", err)
+			}
+			envLoad, err := GetEnvsFromFile(filepath.Join(workDir, file))
 			if err != nil {
 				return envs, errors.Wrap(err, "Unable to read env_file")
 			}
@@ -1119,6 +1196,9 @@ func ConfigEnvs(service kobject.ServiceConfig, opt kobject.ConvertOptions) ([]ap
 	// Load up the environment variables
 	for _, v := range service.Environment {
 		if !keysFromEnvFile[v.Name] {
+			if strings.Contains(v.Value, "run/secrets") {
+				v.Value = FormatResourceName(v.Value)
+			}
 			envs = append(envs, api.EnvVar{
 				Name:  v.Name,
 				Value: v.Value,
@@ -1211,7 +1291,7 @@ func (k *Kubernetes) CreateWorkloadAndConfigMapObjects(name string, service kobj
 		replica = service.Replicas
 	}
 
-	// Check to see if Docker Compose v3 Deploy.Mode has been set to "global"
+	// Check to see if Compose v3 Deploy.Mode has been set to "global"
 	if service.DeployMode == "global" {
 		//default use daemonset
 		if opt.Controller == "" {
@@ -1263,12 +1343,26 @@ func (k *Kubernetes) createConfigMapFromComposeConfig(name string, service kobje
 	for _, config := range service.Configs {
 		currentConfigName := config.Source
 		currentConfigObj := service.ConfigsMetaData[currentConfigName]
-		if currentConfigObj.External.External {
+		if config.Target == "" {
+			config.Target = currentConfigName
+		}
+		if currentConfigObj.External {
 			continue
 		}
-		currentFileName := currentConfigObj.File
-		configMap := k.InitConfigMapFromFile(name, service, currentFileName)
-		objects = append(objects, configMap)
+		if currentConfigObj.File != "" {
+			currentFileName := currentConfigObj.File
+			configMap := k.InitConfigMapFromFile(name, service, currentFileName)
+			objects = append(objects, configMap)
+		} else if currentConfigObj.Content != "" {
+			content := currentConfigObj.Content
+			configMap := k.InitConfigMapFromContent(name, service, content, currentConfigName, config.Target)
+			objects = append(objects, configMap)
+		} else if currentConfigObj.Environment != "" {
+			// TODO: Add support for environment variables in configmaps
+			log.Warnf("Environment variables in configmaps are not supported yet")
+		} else {
+			log.Warnf("Configmap %s is empty", currentConfigName)
+		}
 	}
 	return objects
 }
@@ -1325,6 +1419,27 @@ func buildServiceImage(opt kobject.ConvertOptions, service kobject.ServiceConfig
 	// Check to see if there is an InputFile (required!) before we build the container
 	// Check that there's actually a Build key
 	// Lastly, we must have an Image name to continue
+
+	// If the user provided a custom build it will override the docker one.
+	if opt.BuildCommand != "" && opt.PushCommand != "" {
+		p := shellwords.NewParser()
+		p.ParseEnv = true
+
+		buildArgs, _ := p.Parse(opt.BuildCommand)
+		buildCommand := exec.Command(buildArgs[0], buildArgs[1:]...)
+		err := buildCommand.Run()
+		if err != nil {
+			return errors.Wrap(err, "error while trying to build a custom container image")
+		}
+
+		pushArgs, _ := p.Parse(opt.PushCommand)
+		pushCommand := exec.Command(pushArgs[0], pushArgs[1:]...)
+		err = pushCommand.Run()
+		if err != nil {
+			return errors.Wrap(err, "error while trying to push a custom container image")
+		}
+		return nil
+	}
 	if opt.Build == "local" && opt.InputFiles != nil && service.Build != "" {
 		// If there's no "image" key, use the name of the container that's built
 		if service.Image == "" {
@@ -1416,31 +1531,42 @@ func (k *Kubernetes) Transform(komposeObject kobject.KomposeObject, opt kobject.
 			allobjects = append(allobjects, item)
 		}
 	}
+
+	if komposeObject.Namespace != "" {
+		ns := transformer.CreateNamespace(komposeObject.Namespace)
+		allobjects = append(allobjects, ns)
+	}
+
 	if opt.ServiceGroupMode != "" {
 		log.Debugf("Service group mode is: %s", opt.ServiceGroupMode)
 		komposeObjectToServiceConfigGroupMapping := KomposeObjectToServiceConfigGroupMapping(&komposeObject, opt)
-		for name, group := range komposeObjectToServiceConfigGroupMapping {
+		sortedGroupMappingKeys := SortedKeys(komposeObjectToServiceConfigGroupMapping)
+		for _, group := range sortedGroupMappingKeys {
+			groupMapping := komposeObjectToServiceConfigGroupMapping[group]
 			var objects []runtime.Object
 			podSpec := PodSpec{}
 
+			var groupName string
 			// if using volume group, the name here will be a volume config string. reset to the first service name
 			if opt.ServiceGroupMode == "volume" {
 				if opt.ServiceGroupName != "" {
-					name = opt.ServiceGroupName
+					groupName = opt.ServiceGroupName
 				} else {
 					var names []string
-					for _, svc := range group {
+					for _, svc := range groupMapping {
 						names = append(names, svc.Name)
 					}
-					name = strings.Join(names, "-")
+					groupName = strings.Join(names, "-")
 				}
+			} else {
+				groupName = group
 			}
 
 			// added a container
 			// ports conflict check between services
 			portsUses := map[string]bool{}
 
-			for _, service := range group {
+			for _, service := range groupMapping {
 				// first do ports check
 				ports := ConfigPorts(service)
 				for _, port := range ports {
@@ -1451,7 +1577,7 @@ func (k *Kubernetes) Transform(komposeObject kobject.KomposeObject, opt kobject.
 					portsUses[key] = true
 				}
 
-				log.Infof("Group Service %s to [%s]", service.Name, name)
+				log.Infof("Group Service %s to [%s]", service.Name, groupName)
 				service.WithKomposeAnnotation = opt.WithKomposeAnnotation
 				podSpec.Append(AddContainer(service, opt))
 
@@ -1459,17 +1585,17 @@ func (k *Kubernetes) Transform(komposeObject kobject.KomposeObject, opt kobject.
 					return nil, err
 				}
 				// override..
-				objects = append(objects, k.CreateWorkloadAndConfigMapObjects(name, service, opt)...)
-				k.configKubeServiceAndIngressForService(service, name, &objects)
+				objects = append(objects, k.CreateWorkloadAndConfigMapObjects(groupName, service, opt)...)
+				k.configKubeServiceAndIngressForService(service, groupName, &objects)
 
 				// Configure the container volumes.
-				volumesMount, volumes, pvc, cms, err := k.ConfigVolumes(name, service)
+				volumesMount, volumes, pvc, cms, err := k.ConfigVolumes(groupName, service)
 				if err != nil {
 					return nil, errors.Wrap(err, "k.ConfigVolumes failed")
 				}
 				// Configure Tmpfs
 				if len(service.TmpFs) > 0 {
-					TmpVolumesMount, TmpVolumes := k.ConfigTmpfs(name, service)
+					TmpVolumesMount, TmpVolumes := k.ConfigTmpfs(groupName, service)
 					volumes = append(volumes, TmpVolumes...)
 					volumesMount = append(volumesMount, TmpVolumesMount...)
 				}
@@ -1491,14 +1617,14 @@ func (k *Kubernetes) Transform(komposeObject kobject.KomposeObject, opt kobject.
 
 				podSpec.Append(
 					SetPorts(service),
-					ImagePullPolicy(name, service),
-					RestartPolicy(name, service),
-					SecurityContext(name, service),
+					ImagePullPolicy(groupName, service),
+					RestartPolicy(groupName, service),
+					SecurityContext(groupName, service),
 					HostName(service),
 					DomainName(service),
 					ResourcesLimits(service),
 					ResourcesRequests(service),
-					TerminationGracePeriodSeconds(name, service),
+					TerminationGracePeriodSeconds(groupName, service),
 					TopologySpreadConstraints(service),
 				)
 
@@ -1506,20 +1632,22 @@ func (k *Kubernetes) Transform(komposeObject kobject.KomposeObject, opt kobject.
 					podSpec.Append(ServiceAccountName(serviceAccountName))
 				}
 
-				err = k.UpdateKubernetesObjectsMultipleContainers(name, service, &objects, podSpec)
+				err = k.UpdateKubernetesObjectsMultipleContainers(groupName, service, &objects, podSpec, opt)
 				if err != nil {
 					return nil, errors.Wrap(err, "Error transforming Kubernetes objects")
 				}
 
-				if err = k.configNetworkPolicyForService(service, service.Name, &objects); err != nil {
-					return nil, err
+				if opt.GenerateNetworkPolicies {
+					if err = k.configNetworkPolicyForService(service, service.Name, &objects); err != nil {
+						return nil, err
+					}
 				}
 			}
 
 			allobjects = append(allobjects, objects...)
 		}
 	}
-	sortedKeys := SortedKeys(komposeObject)
+	sortedKeys := SortedKeys(komposeObject.ServiceConfigs)
 	for _, name := range sortedKeys {
 		service := komposeObject.ServiceConfigs[name]
 
@@ -1536,11 +1664,23 @@ func (k *Kubernetes) Transform(komposeObject kobject.KomposeObject, opt kobject.
 			return nil, err
 		}
 
-		// Generate pod only and nothing more
+		// Generate pod or cronjob and configmap objects
 		if (service.Restart == "no" || service.Restart == "on-failure") && !opt.IsPodController() {
-			log.Infof("Create kubernetes pod instead of pod controller due to restart policy: %s", service.Restart)
-			pod := k.InitPod(name, service)
-			objects = append(objects, pod)
+			if service.CronJobSchedule != "" {
+				log.Infof("Create kubernetes pod instead of pod controller due to restart policy: %s", service.Restart)
+				cronJob := k.InitCJ(name, service, service.CronJobSchedule, service.CronJobConcurrencyPolicy, service.CronJobBackoffLimit)
+				objects = append(objects, cronJob)
+			} else {
+				pod := k.InitPod(name, service)
+				objects = append(objects, pod)
+			}
+
+			if len(service.EnvFile) > 0 {
+				for _, envFile := range service.EnvFile {
+					configMap := k.InitConfigMapForEnv(name, opt, envFile)
+					objects = append(objects, configMap)
+				}
+			}
 		} else {
 			objects = k.CreateWorkloadAndConfigMapObjects(name, service, opt)
 		}
@@ -1552,8 +1692,14 @@ func (k *Kubernetes) Transform(komposeObject kobject.KomposeObject, opt kobject.
 		if err != nil {
 			return nil, errors.Wrap(err, "Error transforming Kubernetes objects")
 		}
-		if err := k.configNetworkPolicyForService(service, name, &objects); err != nil {
-			return nil, err
+		if opt.GenerateNetworkPolicies {
+			if err := k.configNetworkPolicyForService(service, name, &objects); err != nil {
+				return nil, err
+			}
+		}
+		err = k.configHorizontalPodScaler(name, service, opt, &objects)
+		if err != nil {
+			return nil, errors.Wrap(err, "Error creating Kubernetes HPA")
 		}
 		allobjects = append(allobjects, objects...)
 	}
@@ -1561,7 +1707,13 @@ func (k *Kubernetes) Transform(komposeObject kobject.KomposeObject, opt kobject.
 	// sort all object so Services are first
 	k.SortServicesFirst(&allobjects)
 	k.RemoveDupObjects(&allobjects)
+
+	// Only append namespaces if --namespace has been passed in
+	if komposeObject.Namespace != "" {
+		transformer.AssignNamespaceToObjects(&allobjects, komposeObject.Namespace)
+	}
 	// k.FixWorkloadVersion(&allobjects)
+	k.fixNetworkModeToService(&allobjects, komposeObject.ServiceConfigs)
 	return allobjects, nil
 }
 
@@ -1586,6 +1738,12 @@ func (k *Kubernetes) UpdateController(obj runtime.Object, updateTemplate func(*a
 			return errors.Wrap(err, "updateTemplate failed")
 		}
 		updateMeta(&t.ObjectMeta)
+	case *batchv1.CronJob:
+		err = updateTemplate(&t.Spec.JobTemplate.Spec.Template)
+		if err != nil {
+			return errors.Wrap(err, "updateTemplate failed")
+		}
+		updateMeta(&t.ObjectMeta)
 	case *deployapi.DeploymentConfig:
 		err = updateTemplate(t.Spec.Template)
 		if err != nil {
@@ -1606,5 +1764,18 @@ func (k *Kubernetes) UpdateController(obj runtime.Object, updateTemplate func(*a
 	case *buildapi.BuildConfig:
 		updateMeta(&t.ObjectMeta)
 	}
+	return nil
+}
+
+// configHorizontalPodScaler create Hpa resource also append to the objects
+// first checks if the service labels contain any HPA labels using the searchHPAValues
+func (k *Kubernetes) configHorizontalPodScaler(name string, service kobject.ServiceConfig, opt kobject.ConvertOptions, objects *[]runtime.Object) (err error) {
+	found := searchHPAValues(service.Labels)
+	if !found {
+		return nil
+	}
+
+	hpa := createHPAResources(name, &service)
+	*objects = append(*objects, &hpa)
 	return nil
 }

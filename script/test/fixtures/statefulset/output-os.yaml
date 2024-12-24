@@ -2,7 +2,6 @@
 apiVersion: v1
 kind: Service
 metadata:
-  creationTimestamp: null
   labels:
     io.kompose.service: db
   name: db
@@ -13,14 +12,12 @@ spec:
       targetPort: 3306
   selector:
     io.kompose.service: db
-status:
-  loadBalancer: {}
+
 
 ---
 apiVersion: v1
 kind: Service
 metadata:
-  creationTimestamp: null
   labels:
     io.kompose.service: wordpress
   name: wordpress
@@ -31,14 +28,12 @@ spec:
       targetPort: 80
   selector:
     io.kompose.service: wordpress
-status:
-  loadBalancer: {}
+
 
 ---
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
-  creationTimestamp: null
   labels:
     io.kompose.service: db
   name: db
@@ -50,9 +45,7 @@ spec:
   serviceName: db
   template:
     metadata:
-      creationTimestamp: null
       labels:
-        io.kompose.network/statefulset-default: "true"
         io.kompose.service: db
     spec:
       containers:
@@ -69,17 +62,13 @@ spec:
           name: db
           ports:
             - containerPort: 3306
-              hostPort: 3306
               protocol: TCP
-          resources: {}
           volumeMounts:
             - mountPath: /var/lib/mysql
               name: db-data
       restartPolicy: Always
-  updateStrategy: {}
   volumeClaimTemplates:
     - metadata:
-        creationTimestamp: null
         labels:
           io.kompose.service: db-data
         name: db-data
@@ -89,15 +78,11 @@ spec:
         resources:
           requests:
             storage: 100Mi
-      status: {}
-status:
-  replicas: 0
 
 ---
 apiVersion: apps.openshift.io/v1
 kind: DeploymentConfig
 metadata:
-  creationTimestamp: null
   labels:
     io.kompose.service: db
   name: db
@@ -106,13 +91,10 @@ spec:
   selector:
     io.kompose.service: db
   strategy:
-    resources: {}
     type: Recreate
   template:
     metadata:
-      creationTimestamp: null
       labels:
-        io.kompose.network/statefulset-default: "true"
         io.kompose.service: db
     spec:
       containers:
@@ -129,9 +111,7 @@ spec:
           name: db
           ports:
             - containerPort: 3306
-              hostPort: 3306
               protocol: TCP
-          resources: {}
           volumeMounts:
             - mountPath: /var/lib/mysql
               name: db-data
@@ -147,19 +127,12 @@ spec:
           kind: ImageStreamTag
           name: db:5.7
       type: ImageChange
-status:
-  availableReplicas: 0
-  latestVersion: 0
-  observedGeneration: 0
-  replicas: 0
-  unavailableReplicas: 0
-  updatedReplicas: 0
+
 
 ---
 apiVersion: image.openshift.io/v1
 kind: ImageStream
 metadata:
-  creationTimestamp: null
   labels:
     io.kompose.service: db
   name: db
@@ -167,23 +140,18 @@ spec:
   lookupPolicy:
     local: false
   tags:
-    - annotations: null
-      from:
+    - from:
         kind: DockerImage
         name: mysql:5.7
-      generation: null
-      importPolicy: {}
       name: "5.7"
       referencePolicy:
         type: ""
-status:
-  dockerImageRepository: ""
+
 
 ---
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
-  creationTimestamp: null
   labels:
     io.kompose.service: wordpress
   name: wordpress
@@ -195,9 +163,7 @@ spec:
   serviceName: wordpress
   template:
     metadata:
-      creationTimestamp: null
       labels:
-        io.kompose.network/statefulset-default: "true"
         io.kompose.service: wordpress
     spec:
       containers:
@@ -214,17 +180,13 @@ spec:
           name: wordpress
           ports:
             - containerPort: 80
-              hostPort: 8000
               protocol: TCP
-          resources: {}
           volumeMounts:
             - mountPath: /var/www/html
               name: wordpress-data
       restartPolicy: Always
-  updateStrategy: {}
   volumeClaimTemplates:
     - metadata:
-        creationTimestamp: null
         labels:
           io.kompose.service: wordpress-data
         name: wordpress-data
@@ -234,15 +196,11 @@ spec:
         resources:
           requests:
             storage: 100Mi
-      status: {}
-status:
-  replicas: 0
 
 ---
 apiVersion: apps.openshift.io/v1
 kind: DeploymentConfig
 metadata:
-  creationTimestamp: null
   labels:
     io.kompose.service: wordpress
   name: wordpress
@@ -251,13 +209,10 @@ spec:
   selector:
     io.kompose.service: wordpress
   strategy:
-    resources: {}
     type: Recreate
   template:
     metadata:
-      creationTimestamp: null
       labels:
-        io.kompose.network/statefulset-default: "true"
         io.kompose.service: wordpress
     spec:
       containers:
@@ -274,9 +229,7 @@ spec:
           name: wordpress
           ports:
             - containerPort: 80
-              hostPort: 8000
               protocol: TCP
-          resources: {}
           volumeMounts:
             - mountPath: /var/www/html
               name: wordpress-data
@@ -292,19 +245,12 @@ spec:
           kind: ImageStreamTag
           name: wordpress:latest
       type: ImageChange
-status:
-  availableReplicas: 0
-  latestVersion: 0
-  observedGeneration: 0
-  replicas: 0
-  unavailableReplicas: 0
-  updatedReplicas: 0
+
 
 ---
 apiVersion: image.openshift.io/v1
 kind: ImageStream
 metadata:
-  creationTimestamp: null
   labels:
     io.kompose.service: wordpress
   name: wordpress
@@ -312,15 +258,11 @@ spec:
   lookupPolicy:
     local: false
   tags:
-    - annotations: null
-      from:
+    - from:
         kind: DockerImage
         name: wordpress:latest
-      generation: null
-      importPolicy: {}
       name: latest
       referencePolicy:
         type: ""
-status:
-  dockerImageRepository: ""
+
 
